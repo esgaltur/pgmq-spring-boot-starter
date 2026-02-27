@@ -1,9 +1,17 @@
 <div align="center">
   <h1>🐘 PGMQ Spring Boot Starter</h1>
-  <p><b>Idiomatic, Enterprise-Grade Spring Boot integration for the PostgreSQL Message Queue (PGMQ) extension.</b></p>
+  <p><b>An idiomatic Spring Boot integration for the PostgreSQL Message Queue (PGMQ) extension.</b></p>
 </div>
 
 <br/>
+
+> ⚠️ **Project Status: Early Development (v0.0.1)**
+> 
+> This library implements advanced enterprise messaging patterns (Outbox, Idempotency, Exponential Backoff), but it is currently in its **early beta** phase. It has been heavily tested via automated integration suites, but **has not yet been battle-tested in high-scale production environments**. 
+> 
+> We encourage early adopters to test it, report bugs, and contribute. Please evaluate thoroughly before relying on it for mission-critical data.
+
+---
 
 > **Replace Kafka or RabbitMQ with Postgres.** If your application already uses PostgreSQL, you can get highly reliable, distributed asynchronous messaging without deploying any new infrastructure.
 
