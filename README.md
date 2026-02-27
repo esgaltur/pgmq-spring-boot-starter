@@ -202,14 +202,14 @@ PGMQ is a Point-to-Point queue. If you need one event to be consumed independent
 
 ```mermaid
 graph LR
-    subgraph PGMQ (Point-to-Point)
+    subgraph PGMQ["PGMQ (Point-to-Point)"]
         Event1((Event)) --> Billing
         Event1 -.x Shipping
         Event1 -.x Analytics
-        Note over Shipping: Cannot read.<br/>Already consumed.
+        Note1["Cannot read.<br/>Already consumed."]
     end
     
-    subgraph Kafka (Pub/Sub)
+    subgraph Kafka["Kafka (Pub/Sub)"]
         Event2((Event)) --> B(Billing)
         Event2 --> S(Shipping)
         Event2 --> A(Analytics)
