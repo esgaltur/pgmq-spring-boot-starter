@@ -166,18 +166,17 @@ Postgres connections are heavy OS processes. If you scale to 50 pods, each with 
 
 ```mermaid
 graph TD
-    subgraph Spring Boot Pods
-        P1(Pod 1: 10 Threads)
-        P2(Pod 2: 10 Threads)
-        P3(Pod N: 10 Threads)
+    subgraph SpringPods ["Spring Boot Pods"]
+        P1["Pod 1: 10 Threads"]
+        P2["Pod 2: 10 Threads"]
+        P3["Pod N: 10 Threads"]
     end
     
-    P1 -- 10 TCP Connections --> DB[(PostgreSQL)]
-    P2 -- 10 TCP Connections --> DB
-    P3 -- 10 TCP Connections --> DB
+    P1 -->|10 TCP Connections| DB[("PostgreSQL")]
+    P2 -->|10 TCP Connections| DB
+    P3 -->|10 TCP Connections| DB
     
     style DB fill:#ffcccc,stroke:#ff0000
-    Note over DB: Connection Pool Maxed Out!
 ```
 
 ### 2. The Polling Tax
