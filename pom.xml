@@ -5,8 +5,8 @@
     <groupId>io.github.esgaltur</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>pgmq-spring-boot-starter</name>
-    <description>Spring Boot Starter for PGMQ (Postgres Message Queue)</description>
+    <name>PGMQ Spring Boot Starter</name>
+    <description>Spring-native durable messaging with PostgreSQL Message Queue</description>
 
     <url>https://github.com/esgaltur/pgmq-spring-boot-starter</url>
 

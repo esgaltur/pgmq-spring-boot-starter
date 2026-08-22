@@ -1,6 +1,19 @@
 <div align="center">
-  <h1>🐘 PGMQ Spring Boot Starter</h1>
-  <p><b>An idiomatic Spring Boot integration for the PostgreSQL Message Queue (PGMQ) extension.</b></p>
+  <img
+    src="docs/assets/pgmq-spring-banner.png"
+    alt="PGMQ Spring Boot Starter — Durable queues. Instant wake-ups. Spring-native."
+    width="100%"
+  />
+  <h1>PGMQ Spring Boot Starter</h1>
+  <p><b>Durable queues. Instant wake-ups. Spring-native.</b></p>
+  <p>An idiomatic Spring Boot integration for PostgreSQL Message Queue.</p>
+  <p>
+    <img src="https://img.shields.io/badge/Java-17%2B-336791?logo=openjdk&amp;logoColor=white" alt="Java 17+" />
+    <img src="https://img.shields.io/badge/Spring_Boot-4.0-6DB33F?logo=springboot&amp;logoColor=white" alt="Spring Boot 4.0" />
+    <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&amp;logoColor=white" alt="PostgreSQL 14+" />
+    <img src="https://img.shields.io/badge/license-MIT-13233A" alt="MIT License" />
+    <img src="https://img.shields.io/badge/status-early_beta-E5A50A" alt="Early beta" />
+  </p>
 </div>
 
 <br/>
@@ -449,6 +462,9 @@ Contributions, issues, and feature requests are highly welcome!
 3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the Branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
+
+Visual identity, palette, and asset usage are documented in the
+[brand guide](docs/BRAND.md).
 
 ## 📄 License
 This project is licensed under the MIT License - see the `LICENSE` file for details.
