@@ -28,6 +28,8 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 - **Exactly-Once Delivery:** Built-in idempotency repository to prevent duplicate message processing.
 - **High Throughput Batching:** Process messages in bulk by accepting `List<T>` parameters.
 - **Concurrent Consumer Scaling:** Spin up multiple parallel threads per queue effortlessly.
+- **Complementary Notification Wake-ups:** Combine durable PGMQ reads with native PostgreSQL
+  `LISTEN/NOTIFY` for fast wake-ups and periodic polling for recovery.
 - **Delayed Messaging:** Schedule work for the future without needing Quartz or Cron.
 - **Cloud-Native Configuration:** Full SpEL support (`${app.queue.name}`) for Kubernetes ConfigMaps.
 - **Day-2 Observability:** Deep integration with Micrometer (Prometheus) exposing throughput, latency, and queue depth metrics.
@@ -110,7 +112,7 @@ requires PGMQ's `enable_notify_insert` function. If notifications cannot be enab
 the affected queue automatically falls back to its configured `pollInterval`.
 For production, notification triggers can be managed in migrations by setting
 `auto-enable-notifications: false`. See the measured
-[polling versus LISTEN/NOTIFY comparison](docs/LISTEN_NOTIFY_COMPARISON.md).
+[listener wake-up mode comparison](docs/LISTEN_NOTIFY_COMPARISON.md).
 
 `LISTEN/NOTIFY` is only the wake-up mechanism. The PGMQ extension is still
 required and remains responsible for durable message storage and consumption.
@@ -121,6 +123,22 @@ Removing PGMQ would require this starter to implement its own durable queue
 tables, transactional message claiming, retries, and visibility timeouts.
 `LISTEN/NOTIFY` alone is suitable only for best-effort broadcasts where losing
 an event while a consumer is disconnected is acceptable.
+
+### Complementary listener architecture
+
+Notification mode combines three responsibilities rather than replacing one
+queue implementation with another:
+
+```text
+PGMQ durable queue ───────────────> pgmq.read() ──> listener method
+       │                                ▲
+       └─ committed insert ─> NOTIFY ───┤ fast wake-up
+                                        │
+                    recovery timer ─────┘ missed/delayed-message safety
+```
+
+Consumers always claim and load messages through PGMQ. A notification or timer
+only decides when an idle consumer should perform its next durable queue read.
 
 ```mermaid
 sequenceDiagram
@@ -204,7 +222,7 @@ If you are deploying your Spring Boot app as a Docker container that runs contin
 
 ### 2. Serverless Functions (AWS Lambda)
 **Do not use `@PgmqListener` in AWS Lambda.** 
-When an AWS Lambda function finishes handling a request, AWS *freezes* the CPU. Any background polling threads will be suspended, leading to dropped messages or timeouts. 
+When an AWS Lambda function finishes handling a request, AWS *freezes* the CPU. Any background listener threads will be suspended, delaying message processing until the function resumes.
 
 Instead, configure an Amazon EventBridge Scheduler to trigger your Lambda every minute, and use the `PgmqTemplate.read()` or `PgmqTemplate.pop()` method synchronously inside your function handler:
 
@@ -371,7 +389,7 @@ app:
     concurrency = "${app.queues.orders-concurrency:1}"
 )
 public void handle(OrderEvent event) {
-    // Spins up 5 independent background threads polling 'prod_orders_v1'
+    // Spins up 5 independent consumer workers for 'prod_orders_v1'
 }
 ```
 

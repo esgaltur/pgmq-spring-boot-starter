@@ -8,7 +8,7 @@ This document outlines the system, software, and dependency requirements for usi
 - **Version:** PostgreSQL 14 or higher is recommended.
 - **Extension:** The [`pgmq`](https://github.com/tembo-io/pgmq) extension must be installed on your PostgreSQL server. 
   - *Note:* If you are using a managed database provider (like AWS RDS, GCP Cloud SQL, or Azure), ensure they support installing custom extensions or provide `pgmq` natively (e.g., Tembo Cloud).
-  - PGMQ 1.10 or newer is required for throttled `LISTEN/NOTIFY` mode. Older versions automatically fall back to polling.
+  - PGMQ 1.10 or newer is required for the complementary throttled `LISTEN/NOTIFY` wake-up mode. PGMQ remains the durable queue in this mode; older versions automatically fall back to polling.
 
 ### Java Development Kit (JDK)
 - **Version:** Java 17 or higher. 

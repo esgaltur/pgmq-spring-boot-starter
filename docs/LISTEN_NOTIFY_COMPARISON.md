@@ -1,6 +1,8 @@
-# LISTEN/NOTIFY comparison
+# PGMQ listener wake-up strategies
 
-The starter supports two listener modes against the same durable PGMQ queues:
+The starter supports two ways for idle listeners to wait between reads from the
+same durable PGMQ queues. These are wake-up strategies, not separate queue
+backends:
 
 ```yaml
 spring:
@@ -12,7 +14,7 @@ spring:
     auto-enable-notifications: true
 ```
 
-## What notification mode does—and does not—replace
+## How notification mode complements PGMQ
 
 Notification mode uses PostgreSQL's native `LISTEN/NOTIFY` mechanism as a
 **wake-up signal**. It does not use a notification as the message and does not
@@ -25,6 +27,17 @@ are transient, but PGMQ messages are durable. If a notification is missed while
 the connection is unavailable, the message remains in its queue and is found by
 the next recovery scan. A missed notification can increase latency; it does not
 discard the queued message.
+
+The feature has three complementary parts:
+
+| Component | Responsibility |
+|---|---|
+| PGMQ | Persist, claim, retry, archive, and delete messages |
+| PostgreSQL `LISTEN/NOTIFY` | Wake idle consumers promptly after committed inserts |
+| Recovery polling | Find missed notifications, delayed messages, and visibility-timeout retries |
+
+Both wake-up paths lead to the same `pgmq.read` operation. Notification mode
+does not introduce a second delivery path or change PGMQ's durability model.
 
 ### Can native LISTEN/NOTIFY remove the PGMQ extension dependency?
 
