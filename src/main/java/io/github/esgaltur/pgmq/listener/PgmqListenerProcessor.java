@@ -1,11 +1,7 @@
 package io.github.esgaltur.pgmq.listener;
 
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
-import io.github.esgaltur.pgmq.annotation.PgmqListener;
+import io.github.esgaltur.pgmq.annotation.PgmqListenerMode;
 import io.github.esgaltur.pgmq.config.PgmqProperties;
-import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.core.PgmqMessage;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import lombok.RequiredArgsConstructor;
@@ -17,6 +13,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Future;
 
@@ -26,10 +24,11 @@ public class PgmqListenerProcessor implements SmartLifecycle {
 
     private final PgmqListenerRegistrar listenerRegistrar;
     private final PgmqTemplate pgmqTemplate;
-    private final PgmqIdempotencyRepository idempotencyRepository;
+    private final PgmqMessageHandler messageHandler;
     private final PgmqProperties pgmqProperties;
     private final PgmqListenerWakeupStrategy wakeupStrategy;
-    private final MeterRegistry meterRegistry; // Optional
+    private final PgmqListenerStatus listenerStatus;
+    private final PgmqListenerMetrics listenerMetrics;
 
     private final ThreadPoolTaskScheduler taskScheduler = new ThreadPoolTaskScheduler();
     private final List<Future<?>> futures = new ArrayList<>();
@@ -48,12 +47,15 @@ public class PgmqListenerProcessor implements SmartLifecycle {
         }
 
         Set<String> uniqueQueues = new HashSet<>();
-        Set<String> listenerQueues = new HashSet<>();
+        Map<String, PgmqListenerMode> listenerQueues = listeners.stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        PgmqListenerMetadata::queue,
+                        this::resolveListenerMode,
+                        this::requireCompatibleModes));
 
         // Auto-create queues before starting consumer workers.
         if (pgmqProperties.isAutoCreateQueue()) {
             for (PgmqListenerMetadata metadata : listeners) {
-                listenerQueues.add(metadata.queue());
                 try {
                     pgmqTemplate.createQueue(metadata.queue());
                     uniqueQueues.add(metadata.queue());
@@ -64,27 +66,22 @@ public class PgmqListenerProcessor implements SmartLifecycle {
                         uniqueQueues.add(metadata.deadLetterQueue());
                         log.debug("Ensured PGMQ dead-letter queue {} exists.", metadata.deadLetterQueue());
                     }
-                } catch (Exception e) {
-                    log.warn("Could not auto-create queues for {}.", metadata.queue(), e);
+                } catch (Exception exception) {
+                    log.warn("Could not auto-create PGMQ queue {}: {}",
+                            metadata.queue(), exception.getMessage());
+                    log.debug("PGMQ queue auto-creation failure for {}.", metadata.queue(), exception);
                 }
             }
         } else {
             for (PgmqListenerMetadata metadata : listeners) {
                 uniqueQueues.add(metadata.queue());
-                listenerQueues.add(metadata.queue());
             }
         }
 
         wakeupStrategy.start(listenerQueues);
 
-        // Register Queue Depth Metrics
-        if (meterRegistry != null) {
-            for (String queue : uniqueQueues) {
-                Gauge.builder("pgmq.queue.depth", () -> pgmqTemplate.getQueueDepth(queue))
-                     .tag("queue", queue)
-                     .description("Current number of messages in the PGMQ queue")
-                     .register(meterRegistry);
-            }
+        for (String queue : uniqueQueues) {
+            listenerMetrics.registerQueue(queue, () -> pgmqTemplate.getQueueDepth(queue));
         }
 
         int totalThreads = listeners.stream().mapToInt(l -> Math.max(1, l.concurrency())).sum();
@@ -95,6 +92,7 @@ public class PgmqListenerProcessor implements SmartLifecycle {
         taskScheduler.initialize();
 
         this.running = true;
+        listenerStatus.processorStarted();
         for (PgmqListenerMetadata metadata : listeners) {
             int concurrency = Math.max(1, metadata.concurrency());
             for (int i = 0; i < concurrency; i++) {
@@ -120,7 +118,12 @@ public class PgmqListenerProcessor implements SmartLifecycle {
             }
 
             try {
-                waitHandle.awaitChange(observedGeneration);
+                Optional<Duration> nextVisibleDelay = nextVisibleDelay(metadata.queue());
+                PgmqListenerWakeupStrategy.WakeupReason reason = waitHandle.awaitChange(
+                        observedGeneration, nextVisibleDelay);
+                if (running) {
+                    listenerStatus.wakeup(reason);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -135,8 +138,12 @@ public class PgmqListenerProcessor implements SmartLifecycle {
         Class<?> payloadType = metadata.payloadType();
 
         try {
+            listenerStatus.queueRead();
             List<?> rawMessages = pgmqTemplate.read(queue, vt, qty, payloadType);
-            if (rawMessages.isEmpty()) return false;
+            if (rawMessages.isEmpty()) {
+                listenerStatus.emptyRead();
+                return false;
+            }
             log.debug("Read {} message(s) from PGMQ queue {}.", rawMessages.size(), queue);
 
             List<PgmqMessage<?>> batchToProcess = new ArrayList<>();
@@ -149,21 +156,9 @@ public class PgmqListenerProcessor implements SmartLifecycle {
                     int maxRetries = metadata.annotation().maxRetries();
                     if (maxRetries > 0 && msg.getReadCount() > maxRetries) {
                         log.warn("Message {} from {} exceeded max retries ({}). Routing to DLQ.", msg.getMsgId(), queue, maxRetries);
-                        if (metadata.deadLetterQueue() != null && !metadata.deadLetterQueue().isEmpty()) {
-                            pgmqTemplate.send(metadata.deadLetterQueue(), msg.getPayload());
-                        }
-                        archiveOrDelete(metadata.annotation(), queue, msg.getMsgId());
+                        messageHandler.routeToDeadLetter(metadata, msg);
                         recordMetric("dlq", queue);
                         continue;
-                    }
-
-                    // Check Idempotency
-                    if (metadata.annotation().idempotent()) {
-                        if (idempotencyRepository.isProcessed(queue, msg.getMsgId())) {
-                            log.debug("Message {} from queue {} already processed. Skipping.", msg.getMsgId(), queue);
-                            archiveOrDelete(metadata.annotation(), queue, msg.getMsgId());
-                            continue;
-                        }
                     }
 
                     batchToProcess.add(msg);
@@ -174,77 +169,57 @@ public class PgmqListenerProcessor implements SmartLifecycle {
 
             if (batchToProcess.isEmpty()) return true;
 
-            Timer.Sample sample = null;
-            if (meterRegistry != null) {
-                sample = Timer.start(meterRegistry);
-            }
-
-            try {
-                if (metadata.batch()) {
-                    processBatch(metadata, queue, batchToProcess);
-                } else {
-                    processSequentially(metadata, queue, batchToProcess);
-                }
-
-                if (sample != null) {
-                    sample.stop(meterRegistry.timer("pgmq.listener.latency", "queue", queue, "status", "success"));
-                }
-            } catch (Exception processException) {
-                if (sample != null) {
-                    sample.stop(meterRegistry.timer("pgmq.listener.latency", "queue", queue, "status", "failure"));
-                }
-                throw processException;
-            }
+            long processingStartedAt = System.nanoTime();
+            boolean successful = metadata.batch()
+                    ? processBatch(metadata, queue, batchToProcess)
+                    : processSequentially(metadata, queue, batchToProcess);
+            listenerMetrics.processingCompleted(
+                    queue,
+                    successful ? "success" : "failure",
+                    Duration.ofNanos(System.nanoTime() - processingStartedAt));
 
         } catch (Exception e) {
             // General polling failure
+            listenerStatus.pollFailure();
             log.error("Error polling PGMQ queue {}.", queue, e);
             return false;
         }
         return true;
     }
 
-    private void processBatch(PgmqListenerMetadata metadata, String queue, List<PgmqMessage<?>> batch) {
+    private boolean processBatch(PgmqListenerMetadata metadata, String queue, List<PgmqMessage<?>> batch) {
         try {
-            Object argument;
-            if (metadata.messageWrapped()) {
-                argument = batch;
-            } else {
-                List<Object> payloads = new ArrayList<>();
-                for (PgmqMessage<?> m : batch) {
-                    payloads.add(m.getPayload());
-                }
-                argument = payloads;
-            }
-
-            metadata.method().invoke(metadata.bean(), argument);
-
-            for (PgmqMessage<?> msg : batch) {
-                markIdempotentAndArchive(metadata.annotation(), queue, msg.getMsgId());
+            int processed = messageHandler.processBatch(metadata, batch);
+            for (int index = 0; index < processed; index++) {
                 recordMetric("success", queue);
             }
+            return true;
         } catch (Exception e) {
             log.error("Error processing batch for queue {}.", queue, e);
             handleBackoffForBatch(metadata, queue, batch);
+            return false;
         }
     }
 
-    private void processSequentially(PgmqListenerMetadata metadata, String queue, List<PgmqMessage<?>> batch) {
+    private boolean processSequentially(PgmqListenerMetadata metadata, String queue, List<PgmqMessage<?>> batch) {
+        boolean successful = true;
         for (PgmqMessage<?> msg : batch) {
             try {
-                if (metadata.messageWrapped()) {
-                    metadata.method().invoke(metadata.bean(), msg);
+                PgmqMessageHandler.Outcome outcome = messageHandler.processSingle(metadata, msg);
+                if (outcome == PgmqMessageHandler.Outcome.DUPLICATE) {
+                    log.debug("Message {} from queue {} was already processed. Skipping.",
+                            msg.getMsgId(), queue);
                 } else {
-                    metadata.method().invoke(metadata.bean(), msg.getPayload());
+                    recordMetric("success", queue);
                 }
-                markIdempotentAndArchive(metadata.annotation(), queue, msg.getMsgId());
-                recordMetric("success", queue);
             } catch (Exception e) {
+                successful = false;
                 log.error("Error processing message {} from queue {}.", msg.getMsgId(), queue, e);
                 handleBackoff(metadata, queue, msg);
                 recordMetric("failure", queue);
             }
         }
+        return successful;
     }
 
     private void handleBackoffForBatch(PgmqListenerMetadata metadata, String queue, List<PgmqMessage<?>> batch) {
@@ -273,24 +248,7 @@ public class PgmqListenerProcessor implements SmartLifecycle {
     }
 
     private void recordMetric(String status, String queue) {
-        if (meterRegistry != null) {
-            meterRegistry.counter("pgmq.messages.processed", "queue", queue, "status", status).increment();
-        }
-    }
-
-    private void markIdempotentAndArchive(PgmqListener annotation, String queue, long msgId) {
-        if (annotation.idempotent()) {
-            idempotencyRepository.markProcessed(queue, msgId);
-        }
-        archiveOrDelete(annotation, queue, msgId);
-    }
-
-    private void archiveOrDelete(PgmqListener annotation, String queue, long msgId) {
-        if (annotation.archive()) {
-            pgmqTemplate.archive(queue, msgId);
-        } else {
-            pgmqTemplate.delete(queue, msgId);
-        }
+        listenerMetrics.messageProcessed(queue, status);
     }
 
     @Override
@@ -305,6 +263,7 @@ public class PgmqListenerProcessor implements SmartLifecycle {
         futures.clear();
         
         taskScheduler.shutdown();
+        listenerStatus.processorStopped();
         
         log.info("PGMQ Listener Processor successfully stopped.");
     }
@@ -312,6 +271,37 @@ public class PgmqListenerProcessor implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         return this.running;
+    }
+
+    private Optional<Duration> nextVisibleDelay(String queue) {
+        if (!pgmqProperties.isScheduleDelayedMessages()) {
+            return Optional.empty();
+        }
+        try {
+            return pgmqTemplate.getNextVisibleDelay(queue);
+        } catch (Exception exception) {
+            log.debug("Could not inspect the next visibility timestamp for queue {}.", queue, exception);
+            return Optional.empty();
+        }
+    }
+
+    private PgmqListenerMode resolveListenerMode(PgmqListenerMetadata metadata) {
+        if (metadata.annotation().mode() != PgmqListenerMode.DEFAULT) {
+            return metadata.annotation().mode();
+        }
+        return pgmqProperties.getListenerMode() == PgmqProperties.ListenerMode.NOTIFY
+                ? PgmqListenerMode.NOTIFY
+                : PgmqListenerMode.POLLING;
+    }
+
+    private PgmqListenerMode requireCompatibleModes(
+            PgmqListenerMode first,
+            PgmqListenerMode second) {
+        if (first != second) {
+            throw new IllegalStateException(
+                    "Listeners sharing one PGMQ queue must use the same wake-up mode");
+        }
+        return first;
     }
 
 }

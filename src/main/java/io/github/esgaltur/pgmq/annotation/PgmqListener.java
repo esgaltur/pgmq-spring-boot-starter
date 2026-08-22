@@ -12,9 +12,15 @@ import java.lang.annotation.Target;
 @Component
 public @interface PgmqListener {
     /**
-     * The name of the queue to listen to. Supports Spring SpEL expressions (e.g. "${my.queue}").
+     * The name of the queue to listen to. Supports Spring property placeholders
+     * such as {@code ${my.queue}}.
      */
     String queue();
+
+    /**
+     * Overrides the application-wide listener wake-up mode for this queue.
+     */
+    PgmqListenerMode mode() default PgmqListenerMode.DEFAULT;
 
     /**
      * Visibility timeout in seconds.
@@ -38,8 +44,8 @@ public @interface PgmqListener {
     boolean archive() default true;
 
     /**
-     * If true, enables idempotency checks to prevent duplicate processing of the same message ID.
-     * Requires an IdempotencyRepository bean.
+     * If true, completed message IDs are recorded and skipped on later redelivery.
+     * This does not guarantee exactly-once external side effects.
      */
     boolean idempotent() default false;
 
@@ -50,13 +56,15 @@ public @interface PgmqListener {
     int maxRetries() default -1;
 
     /**
-     * The name of the Dead Letter Queue to route poison pills to. Supports SpEL.
+     * The name of the Dead Letter Queue to route poison pills to. Supports
+     * Spring property placeholders.
      * If empty, poison pills are simply archived/deleted based on the archive() flag.
      */
     String deadLetterQueue() default "";
 
     /**
-     * Number of concurrent threads to spin up for this listener. Supports SpEL.
+     * Number of concurrent threads to spin up for this listener. Supports
+     * Spring property placeholders.
      * Useful for scaling out throughput on a single queue.
      */
     String concurrency() default "1";

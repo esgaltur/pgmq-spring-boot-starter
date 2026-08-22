@@ -38,6 +38,7 @@ public final class PgmqListenerRegistrar implements BeanPostProcessor, EmbeddedV
             if (method.getParameterCount() != 1) {
                 throw new IllegalArgumentException("@PgmqListener method must have exactly one parameter");
             }
+            validateOptions(annotation, method.toGenericString());
 
             ResolvableType parameterType = ResolvableType.forMethodParameter(method, 0);
             boolean batch = List.class.isAssignableFrom(parameterType.resolve(Object.class));
@@ -50,13 +51,24 @@ public final class PgmqListenerRegistrar implements BeanPostProcessor, EmbeddedV
             String queue = resolve(annotation.queue());
             String deadLetterQueue = resolve(annotation.deadLetterQueue());
             int concurrency = Integer.parseInt(resolve(annotation.concurrency()));
+            if (queue.isBlank()) {
+                throw new IllegalArgumentException("@PgmqListener queue must not be blank");
+            }
+            if (concurrency <= 0) {
+                throw new IllegalArgumentException("@PgmqListener concurrency must be greater than zero");
+            }
+            if (!deadLetterQueue.isEmpty() && deadLetterQueue.equals(queue)) {
+                throw new IllegalArgumentException("@PgmqListener dead-letter queue must differ from its source queue");
+            }
+            ReflectionUtils.makeAccessible(method);
 
             listeners.add(new PgmqListenerMetadata(
                     bean, method, annotation, payloadType, messageWrapped, batch,
                     queue, deadLetterQueue, concurrency));
             log.info("Registered PGMQ listener on method {} for queue {} " +
-                            "(Batch: {}, Type: {}, Concurrency: {})",
-                    method.getName(), queue, batch, payloadType.getSimpleName(), concurrency);
+                            "(Batch: {}, Type: {}, Concurrency: {}, Mode: {})",
+                    method.getName(), queue, batch, payloadType.getSimpleName(), concurrency,
+                    annotation.mode());
         });
         return bean;
     }
@@ -71,5 +83,30 @@ public final class PgmqListenerRegistrar implements BeanPostProcessor, EmbeddedV
             throw new IllegalArgumentException("Could not resolve @PgmqListener value: " + value);
         }
         return resolved;
+    }
+
+    private static void validateOptions(PgmqListener annotation, String method) {
+        if (annotation.vt() <= 0) {
+            throw invalid(method, "vt must be greater than zero");
+        }
+        if (annotation.qty() <= 0) {
+            throw invalid(method, "qty must be greater than zero");
+        }
+        if (annotation.pollInterval() <= 0L) {
+            throw invalid(method, "pollInterval must be greater than zero");
+        }
+        if (!Double.isFinite(annotation.backoffMultiplier()) || annotation.backoffMultiplier() < 1.0) {
+            throw invalid(method, "backoffMultiplier must be finite and at least 1.0");
+        }
+        if (annotation.maxBackoff() <= 0) {
+            throw invalid(method, "maxBackoff must be greater than zero");
+        }
+        if (annotation.backoffMultiplier() > 1.0 && annotation.maxBackoff() < annotation.vt()) {
+            throw invalid(method, "maxBackoff must not be shorter than vt when backoff is enabled");
+        }
+    }
+
+    private static IllegalArgumentException invalid(String method, String reason) {
+        return new IllegalArgumentException("Invalid @PgmqListener on " + method + ": " + reason);
     }
 }

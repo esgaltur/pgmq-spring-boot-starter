@@ -1,7 +1,7 @@
 package io.github.esgaltur.pgmq.core;
 
 /**
- * Repository for tracking processed message IDs to ensure idempotent message consumption.
+ * Repository for tracking completed message IDs to deduplicate later redeliveries.
  */
 public interface PgmqIdempotencyRepository {
     

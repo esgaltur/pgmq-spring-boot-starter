@@ -14,12 +14,17 @@ import org.springframework.jdbc.core.RowMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 
 @Slf4j
 @RequiredArgsConstructor
 public class PgmqTemplate {
+
+    /** Database support detected for PGMQ insert notifications. */
+    public record NotificationCapability(boolean supported, String pgmqVersion, String detail) {
+    }
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -95,6 +100,85 @@ public class PgmqTemplate {
      */
     public String getInsertNotificationChannel(String queueName) {
         return "pgmq.q_" + queueName + ".INSERT";
+    }
+
+    /**
+     * Detects notification support without invoking the optional PGMQ function.
+     */
+    public NotificationCapability getNotificationCapability() {
+        List<NotificationCapability> capabilities = jdbcTemplate.query(
+                """
+                SELECT pg_extension_entry.extversion,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_proc procedure_entry
+                           JOIN pg_namespace namespace_entry
+                             ON namespace_entry.oid = procedure_entry.pronamespace
+                           WHERE namespace_entry.nspname = 'pgmq'
+                             AND procedure_entry.proname = 'enable_notify_insert'
+                       ) AS notify_supported
+                FROM pg_extension pg_extension_entry
+                WHERE pg_extension_entry.extname = 'pgmq'
+                """,
+                (resultSet, rowNum) -> {
+                    String version = resultSet.getString("extversion");
+                    boolean supported = resultSet.getBoolean("notify_supported");
+                    String detail = supported
+                            ? "PGMQ " + version + " exposes enable_notify_insert"
+                            : "PGMQ " + version + " does not expose enable_notify_insert";
+                    return new NotificationCapability(supported, version, detail);
+                });
+        if (capabilities.isEmpty()) {
+            return new NotificationCapability(false, "unavailable", "PGMQ extension is not installed");
+        }
+        return capabilities.get(0);
+    }
+
+    /**
+     * Returns the time until the earliest currently invisible queue message
+     * becomes visible. This is used only to schedule listener wake-ups.
+     */
+    public Optional<Duration> getNextVisibleDelay(String queueName) {
+        String queueTable = quoteIdentifier("q_" + queueName);
+        String sql = """
+                SELECT CEIL(EXTRACT(EPOCH FROM (MIN(vt) - clock_timestamp())) * 1000)::bigint
+                FROM pgmq.%s
+                WHERE vt > clock_timestamp()
+                """.formatted(queueTable);
+        Long delayMillis = jdbcTemplate.queryForObject(sql, Long.class);
+        return delayMillis == null
+                ? Optional.empty()
+                : Optional.of(Duration.ofMillis(Math.max(1L, delayMillis)));
+    }
+
+    /**
+     * Attempts to claim the short-lived cross-instance lease used to suppress
+     * duplicate immediate reads after PostgreSQL broadcasts a notification.
+     */
+    public boolean tryClaimNotificationWakeup(
+            String queueName,
+            String ownerId,
+            Duration leaseDuration) {
+        List<String> claimedOwners = jdbcTemplate.query(
+                """
+                INSERT INTO pgmq_listener_wakeup_lease (queue_name, owner_id, lease_until)
+                VALUES (?, ?, clock_timestamp() + (? * INTERVAL '1 millisecond'))
+                ON CONFLICT (queue_name) DO UPDATE
+                    SET owner_id = EXCLUDED.owner_id,
+                        lease_until = EXCLUDED.lease_until
+                    WHERE pgmq_listener_wakeup_lease.lease_until <= clock_timestamp()
+                       OR pgmq_listener_wakeup_lease.owner_id = EXCLUDED.owner_id
+                RETURNING owner_id
+                """,
+                (resultSet, rowNumber) -> resultSet.getString("owner_id"),
+                queueName,
+                ownerId,
+                Math.max(1L, leaseDuration.toMillis()));
+        return !claimedOwners.isEmpty() && ownerId.equals(claimedOwners.get(0));
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return '"' + identifier.replace("\"", "\"\"") + '"';
     }
 
     private void executeQueueCommand(String sql, String queueName) {

@@ -26,7 +26,9 @@
 
 ---
 
-> **Replace Kafka or RabbitMQ with Postgres.** If your application already uses PostgreSQL, you can get highly reliable, distributed asynchronous messaging without deploying any new infrastructure.
+> **Use PostgreSQL for application-scale asynchronous work.** When your data is
+> already in PostgreSQL, PGMQ can remove a separate broker from workloads that
+> do not require Kafka- or RabbitMQ-specific capabilities.
 
 This library acts as a native Spring Boot Auto-Configuration module bridging the gap between the [PGMQ](https://github.com/tembo-io/pgmq) extension and the Spring ecosystem. It provides an intuitive `@PgmqListener` annotation and a powerful `PgmqTemplate`, mirroring the developer experience of Spring Kafka or Spring AMQP, while unlocking the ACID guarantees of PostgreSQL.
 
@@ -38,7 +40,8 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 - **Transactional Outbox Built-in:** Send messages safely within your standard `@Transactional` database methods.
 - **Poison Pill Handling:** Automatic routing to Dead Letter Queues (DLQ) after a configurable number of retries.
 - **Exponential Backoff:** Circuit-break failing external APIs by dynamically scaling visibility timeouts.
-- **Exactly-Once Delivery:** Built-in idempotency repository to prevent duplicate message processing.
+- **Transactional Deduplication:** Coordinate same-database listener work,
+  message finalization, and processed-message tracking in one transaction.
 - **High Throughput Batching:** Process messages in bulk by accepting `List<T>` parameters.
 - **Concurrent Consumer Scaling:** Spin up multiple parallel threads per queue effortlessly.
 - **Complementary Notification Wake-ups:** Combine durable PGMQ reads with native PostgreSQL
@@ -46,7 +49,7 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 - **Delayed Messaging:** Schedule work for the future without needing Quartz or Cron.
 - **Cloud-Native Configuration:** Full SpEL support (`${app.queue.name}`) for Kubernetes ConfigMaps.
 - **Day-2 Observability:** Deep integration with Micrometer (Prometheus) exposing throughput, latency, and queue depth metrics.
-- **GraalVM Ready:** Native Image (AOT) compatible out of the box for Serverless deployments.
+- **AOT Integration:** Runtime-hint infrastructure for Spring native-image applications.
 
 ---
 
@@ -54,7 +57,7 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 
 ### 1. Prerequisites
 - Java 17+
-- Spring Boot 3.2+
+- Spring Boot 4.0+
 - PostgreSQL database with the `pgmq` extension installed. *(See the [PGMQ documentation](https://github.com/tembo-io/pgmq) for installation instructions).*
 
 ### 2. Dependency
@@ -80,9 +83,14 @@ spring:
 
   pgmq:
     auto-create-queue: true    # Automatically creates queues used by listeners
-    listener-mode: notify      # LISTEN/NOTIFY (default), or polling
-    notification-recovery-interval: 30s # Safety scan for missed/delayed messages
+    listener-mode: polling     # Safe default; set notify to opt in
+    notification-recovery-interval: 30s # Safety scan for missed signals
+    notification-reconnect-interval: 1s # Retry delay after LISTEN failure
     notification-throttle-interval: 250ms # Coalesce burst notifications
+    notification-wakeup-jitter: 25ms # Spread competing reads across replicas
+    coordinate-notification-wakeups: true # Lease one immediate read across replicas
+    notification-wakeup-lease: 1s # Short lease; must be below recovery interval
+    schedule-delayed-messages: true # Wake near delayed/retry visibility time
     default-vt: 30             # Default Visibility Timeout in seconds
     default-poll-interval: 500 # Default polling interval in milliseconds
     shutdown-timeout: 10s      # Grace period for in-flight messages during JVM shutdown
@@ -208,7 +216,7 @@ Why choose Postgres for messaging instead of Kafka, RabbitMQ, or AWS SQS?
 
 ### Choosing notification or polling mode
 
-Use the default `notify` mode for transactional outbox events, email and webhook
+Use `notify` mode for transactional outbox events, email and webhook
 jobs, workflow steps, and other sparse or bursty queues where low idle-to-active
 latency matters. It is best suited to continuously running applications with a
 small or moderate number of replicas and room for one dedicated PostgreSQL
@@ -223,6 +231,23 @@ permissions are unavailable.
 For PgBouncer, the LISTEN connection requires session affinity: use a direct
 PostgreSQL connection or session pooling, not transaction pooling. See the full
 [use-case and mode-selection guide](docs/LISTEN_NOTIFY_COMPARISON.md#recommended-use-cases).
+
+Modes can be selected per queue while retaining the application-wide default:
+
+```java
+@PgmqListener(queue = "interactive_jobs", mode = PgmqListenerMode.NOTIFY)
+public void handleInteractiveJob(Job job) {
+    // Notification-assisted durable reads.
+}
+
+@PgmqListener(queue = "telemetry", mode = PgmqListenerMode.POLLING)
+public void handleTelemetry(List<TelemetryEvent> events) {
+    // Fixed-delay reads for a continuously busy queue.
+}
+```
+
+Listeners sharing one queue must select the same mode; conflicting declarations
+fail during application startup.
 
 ---
 
@@ -291,7 +316,9 @@ public class LambdaQueueWorker implements Function<Object, String> {
 }
 ```
 
-Since this starter includes a `RuntimeHintsRegistrar`, you can compile this exact Lambda to a **GraalVM Native Image** using Spring Cloud Function, dropping your cold starts from 5 seconds to `< 200ms`.
+The starter contributes an AOT runtime-hint hook. Native-image applications
+should still run Spring's native test/build workflow for their own listener
+payloads and reflected methods.
 
 ---
 
@@ -348,16 +375,23 @@ public void handleBatch(List<TelemetryEvent> events) {
 }
 ```
 
-### Idempotency (Exactly-Once Semantics)
-While PGMQ guarantees *At-Least-Once* delivery, you can achieve *Exactly-Once* semantics by enabling the built-in idempotency flag. The starter automatically tracks processed message IDs in a dedicated `pgmq_idempotency` table.
+### Transactional Deduplication
+PGMQ provides at-least-once delivery. Enabling `idempotent` records successfully
+processed message IDs in `pgmq_idempotency`. Listener database work using the
+same transaction manager, the idempotency marker, and PGMQ archive/delete are
+committed or rolled back together.
 
 ```java
 @PgmqListener(queue = "payment_queue", idempotent = true)
 public void processPayment(PaymentEvent event) {
-    // This will only ever execute ONCE per unique PGMQ Message ID,
-    // safely ignoring duplicate redeliveries from timeouts or network partitions.
+    // Completed message IDs are skipped on later redelivery.
 }
 ```
+
+This is deduplication, not a universal exactly-once guarantee. External side
+effects such as HTTP calls can still happen twice if the process fails after the
+remote system accepts the call but before the database transaction commits.
+Use an idempotency key accepted by the remote system for those integrations.
 
 ### Poison Pill Handling (Dead Letter Queues)
 If a payload is malformed, throwing exceptions repeatedly causes an infinite loop. Route poison pills safely to a DLQ.
@@ -407,7 +441,9 @@ public void handle(OrderEvent event) {
 ```
 
 ### Database Schema Management (Flyway / Liquibase)
-By default, the starter automatically creates the PGMQ extension and the idempotency tracking table on startup using Spring's database initializer. 
+By default, the starter creates the PGMQ extension and its small support tables
+for idempotency and cross-instance wake-up coordination using Spring's database
+initializer.
 
 **For Production Environments**, it is an industry standard to manage schemas explicitly via Flyway or Liquibase. You can disable the library's auto-DDL and run the SQL yourself:
 
@@ -427,6 +463,12 @@ CREATE TABLE IF NOT EXISTS pgmq_idempotency (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (queue_name, msg_id)
 );
+
+CREATE TABLE IF NOT EXISTS pgmq_listener_wakeup_lease (
+    queue_name VARCHAR(255) PRIMARY KEY,
+    owner_id VARCHAR(36) NOT NULL,
+    lease_until TIMESTAMPTZ NOT NULL
+);
 ```
 
 ---
@@ -437,6 +479,42 @@ If `io.micrometer:micrometer-core` is on the classpath, the library automaticall
 - `pgmq.messages.processed` (Counter): Tagged by `queue` and `status` (`success`, `failure`, `dlq`).
 - `pgmq.listener.latency` (Timer): Track method execution durations.
 - `pgmq.queue.depth` (Gauge): Emits the current length of the queue.
+- `pgmq.listener.connected` (Gauge): Dedicated LISTEN connection state.
+- `pgmq.listener.notifications` and `pgmq.listener.reconnects` (Counters): Notification lifecycle.
+- `pgmq.listener.recovery.scans`, `pgmq.listener.scheduled.wakeups`, and
+  `pgmq.listener.polling.wakeups` (Counters): Why idle workers resumed.
+- `pgmq.listener.suppressed.wakeups` (Counter): Replica wake-ups suppressed by
+  the short cross-instance lease.
+- `pgmq.listener.queue.reads`, `pgmq.listener.empty.reads`, and
+  `pgmq.listener.poll.failures` (Counters): Database-read behavior and failures.
+
+When Spring Boot health support is present, the `pgmqListener` health component
+reports active queues, their effective modes and fallback reasons, LISTEN state,
+reconnects, notifications, recovery scans, and empty reads. A disconnected
+notification connection reports `DEGRADED` while durable recovery remains active.
+
+Applications may also inject `PgmqListenerStatus` and inspect its immutable
+snapshot without Actuator.
+
+### Dedicated LISTEN datasource
+
+Notification mode uses one session-scoped connection. To keep it away from a
+transaction-pooled PgBouncer endpoint or the application's main Hikari budget,
+provide a datasource qualified with `@PgmqNotificationDataSource`:
+
+```java
+@Bean
+@PgmqNotificationDataSource
+DataSource pgmqListenDataSource() {
+    return DataSourceBuilder.create()
+            .url(directPostgresUrl)
+            .username(username)
+            .password(password)
+            .build();
+}
+```
+
+Without this bean, the primary application datasource is used.
 
 **Kubernetes Autoscaling:** By exposing the `pgmq.queue.depth` gauge to Prometheus, DevOps teams can seamlessly bind **KEDA** (Kubernetes Event-driven Autoscaling) to horizontally autoscale your Spring Boot pods based purely on Consumer Lag.
 

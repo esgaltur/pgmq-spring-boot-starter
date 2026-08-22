@@ -1,6 +1,7 @@
 package io.github.esgaltur.pgmq;
 
 import io.github.esgaltur.pgmq.annotation.PgmqListener;
+import io.github.esgaltur.pgmq.annotation.PgmqListenerMode;
 import io.github.esgaltur.pgmq.core.PgmqMessage;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import lombok.AllArgsConstructor;
@@ -13,6 +14,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -23,12 +25,15 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import io.github.esgaltur.pgmq.listener.PgmqListenerProcessor;
+import io.github.esgaltur.pgmq.listener.PgmqListenerStatus;
 import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.time.Duration;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -76,6 +81,12 @@ public class PgmqIntegrationTest {
     private PgmqListenerProcessor pgmqListenerProcessor;
 
     @Autowired
+    private PgmqListenerStatus listenerStatus;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
     private TestConsumer testConsumer;
 
     @Autowired
@@ -104,6 +115,18 @@ public class PgmqIntegrationTest {
 
     @Autowired
     private ThrottledNotificationTestConsumer throttledNotificationConsumer;
+
+    @Autowired
+    private PollingOverrideConsumer pollingOverrideConsumer;
+
+    @Autowired
+    private FailoverConsumer failoverConsumer;
+
+    @Autowired
+    private ScheduledVisibilityConsumer scheduledVisibilityConsumer;
+
+    @Autowired
+    private TransactionRollbackConsumer transactionRollbackConsumer;
 
     @Test
     void testManualProduceAndConsume() {
@@ -318,6 +341,111 @@ public class PgmqIntegrationTest {
     }
 
     @Test
+    void testPerQueuePollingOverrideAndCapabilityDetection() throws InterruptedException {
+        PgmqTemplate.NotificationCapability capability = pgmqTemplate.getNotificationCapability();
+        assertTrue(capability.supported(), capability.detail());
+        assertEquals(PgmqListenerMode.POLLING,
+                listenerStatus.snapshot().queues().get("polling_override_queue").effectiveMode());
+
+        pgmqTemplate.send("polling_override_queue", new TestPayload("polled", 1));
+        assertTrue(pollingOverrideConsumer.getLatch().await(3, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void testNotificationWakeupLeaseCoordinatesApplicationInstances() throws InterruptedException {
+        String queueName = "notification_lease_probe";
+
+        assertTrue(pgmqTemplate.tryClaimNotificationWakeup(
+                queueName, "owner-a", Duration.ofMillis(300)));
+        assertFalse(pgmqTemplate.tryClaimNotificationWakeup(
+                queueName, "owner-b", Duration.ofMillis(300)),
+                "A second instance must not perform the same immediate queue read");
+        assertTrue(awaitCondition(
+                () -> pgmqTemplate.tryClaimNotificationWakeup(
+                        queueName, "owner-b", Duration.ofMillis(300)),
+                Duration.ofSeconds(2)),
+                "Another instance must be able to claim an expired wake-up lease");
+    }
+
+    @Test
+    void testDelayedListenerWakesNearVisibilityTimestamp() throws InterruptedException {
+        long startedAt = System.nanoTime();
+        pgmqTemplate.sendWithDelay(
+                "scheduled_visibility_queue", new TestPayload("scheduled", 1), 2);
+
+        assertTrue(scheduledVisibilityConsumer.getLatch().await(6, TimeUnit.SECONDS),
+                "Delayed listener did not wake near the message visibility timestamp");
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
+        assertTrue(elapsedMillis >= 1_500 && elapsedMillis < 6_000,
+                "Delayed message should not wait for the 30-second recovery scan");
+        assertTrue(listenerStatus.snapshot().scheduledWakeups() > 0);
+    }
+
+    @Test
+    void testListenConnectionReconnectsAfterBackendTermination() throws InterruptedException {
+        assertTrue(awaitCondition(
+                () -> listenerStatus.snapshot().connectionState()
+                        == PgmqListenerStatus.ConnectionState.CONNECTED,
+                Duration.ofSeconds(3)));
+        long reconnectsBefore = listenerStatus.snapshot().reconnects();
+
+        Boolean terminated = jdbcTemplate.queryForObject(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE application_name = 'pgmq-listener'
+                  AND pid <> pg_backend_pid()
+                LIMIT 1
+                """,
+                Boolean.class);
+        assertEquals(Boolean.TRUE, terminated);
+
+        pgmqTemplate.send("failover_queue", new TestPayload("during_disconnect", 1));
+
+        assertTrue(awaitCondition(
+                () -> listenerStatus.snapshot().reconnects() > reconnectsBefore,
+                Duration.ofSeconds(8)), "LISTEN connection was not re-established");
+        assertTrue(failoverConsumer.getLatch().await(5, TimeUnit.SECONDS),
+                "Message inserted during the LISTEN gap was not recovered");
+    }
+
+    @Test
+    void testListenerDatabaseWorkRollsBackWhenHandlingFails() throws InterruptedException {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS listener_transaction_probe (
+                    value VARCHAR(100) NOT NULL
+                )
+                """);
+        jdbcTemplate.update("DELETE FROM listener_transaction_probe");
+        pgmqTemplate.send("transaction_rollback_queue", new TestPayload("rollback", 1));
+
+        assertTrue(transactionRollbackConsumer.getInvoked().await(3, TimeUnit.SECONDS));
+        assertTrue(awaitCondition(
+                () -> countTransactionProbeRows() == 0,
+                Duration.ofSeconds(2)),
+                "Database writes from a failed listener invocation must roll back");
+    }
+
+    private int countTransactionProbeRows() {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM listener_transaction_probe", Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private static boolean awaitCondition(
+            BooleanSupplier condition,
+            Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(50L);
+        }
+        return condition.getAsBoolean();
+    }
+
+    @Test
     void testQueueDepth() {
         String queueName = "depth_queue";
         pgmqTemplate.createQueue(queueName);
@@ -478,6 +606,64 @@ public class PgmqIntegrationTest {
             public void handleMessage(TestPayload message) {
                 firstMessage.countDown();
                 allMessages.countDown();
+            }
+        }
+
+        @Getter
+        @Component
+        public static class PollingOverrideConsumer {
+            private final CountDownLatch latch = new CountDownLatch(1);
+
+            @PgmqListener(
+                    queue = "polling_override_queue",
+                    mode = PgmqListenerMode.POLLING,
+                    pollInterval = 100)
+            public void handle(TestPayload message) {
+                latch.countDown();
+            }
+        }
+
+        @Getter
+        @Component
+        public static class FailoverConsumer {
+            private final CountDownLatch latch = new CountDownLatch(1);
+
+            @PgmqListener(queue = "failover_queue", mode = PgmqListenerMode.NOTIFY)
+            public void handle(TestPayload message) {
+                latch.countDown();
+            }
+        }
+
+        @Getter
+        @Component
+        public static class ScheduledVisibilityConsumer {
+            private final CountDownLatch latch = new CountDownLatch(1);
+
+            @PgmqListener(
+                    queue = "scheduled_visibility_queue",
+                    mode = PgmqListenerMode.NOTIFY,
+                    pollInterval = 10_000)
+            public void handle(TestPayload message) {
+                latch.countDown();
+            }
+        }
+
+        @Getter
+        @Component
+        public static class TransactionRollbackConsumer {
+            private final CountDownLatch invoked = new CountDownLatch(1);
+            private final JdbcTemplate jdbcTemplate;
+
+            public TransactionRollbackConsumer(JdbcTemplate jdbcTemplate) {
+                this.jdbcTemplate = jdbcTemplate;
+            }
+
+            @PgmqListener(queue = "transaction_rollback_queue", vt = 5)
+            public void handle(TestPayload message) {
+                jdbcTemplate.update(
+                        "INSERT INTO listener_transaction_probe (value) VALUES (?)", message.getName());
+                invoked.countDown();
+                throw new IllegalStateException("Trigger transaction rollback");
             }
         }
     

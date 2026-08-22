@@ -25,15 +25,20 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
 
     private final DataSource dataSource;
     private final Duration reconnectInterval;
+    private final PgmqListenerStatus listenerStatus;
     private final Map<String, PgmqQueueSignal> signalsByChannel = new ConcurrentHashMap<>();
     private final AtomicReference<Connection> activeConnection = new AtomicReference<>();
 
     private volatile boolean running;
     private Thread listenerThread;
 
-    PgmqNotificationCoordinator(DataSource dataSource, Duration reconnectInterval) {
+    PgmqNotificationCoordinator(
+            DataSource dataSource,
+            Duration reconnectInterval,
+            PgmqListenerStatus listenerStatus) {
         this.dataSource = dataSource;
         this.reconnectInterval = reconnectInterval;
+        this.listenerStatus = listenerStatus;
     }
 
     PgmqQueueSignal register(String channel) {
@@ -51,8 +56,16 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
             return;
         }
 
-        Connection initialConnection = openListeningConnection();
+        listenerStatus.connecting();
+        Connection initialConnection;
+        try {
+            initialConnection = openListeningConnection();
+        } catch (SQLException exception) {
+            listenerStatus.disconnected();
+            throw exception;
+        }
         activeConnection.set(initialConnection);
+        listenerStatus.connected(false);
         running = true;
         listenerThread = new Thread(() -> listenLoop(initialConnection), "pgmq-notification-listener");
         listenerThread.setDaemon(true);
@@ -67,8 +80,10 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
         while (running) {
             try {
                 if (connection == null || connection.isClosed()) {
+                    listenerStatus.connecting();
                     connection = openListeningConnection();
                     activeConnection.set(connection);
+                    listenerStatus.connected(true);
                     signalAll();
                     log.info("PGMQ LISTEN connection re-established for {} channel(s).", signalsByChannel.size());
                 }
@@ -82,6 +97,7 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
                 for (PGNotification notification : notifications) {
                     PgmqQueueSignal signal = signalsByChannel.get(notification.getName());
                     if (signal != null) {
+                        listenerStatus.notificationReceived();
                         log.trace("Received PostgreSQL notification on channel {} from backend {}.",
                                 notification.getName(), notification.getPID());
                         signal.signal();
@@ -92,8 +108,11 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
                 }
             } catch (SQLException e) {
                 if (running) {
-                    log.warn("PGMQ LISTEN connection failed; retrying in {}.", reconnectInterval, e);
+                    log.warn("PGMQ LISTEN connection failed; retrying in {}: {}",
+                            reconnectInterval, e.getMessage());
+                    log.debug("PGMQ LISTEN failure details.", e);
                 }
+                listenerStatus.disconnected();
                 closeConnection(connection);
                 activeConnection.compareAndSet(connection, null);
                 connection = null;
@@ -113,6 +132,7 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
         try {
             connection.setAutoCommit(true);
             try (Statement statement = connection.createStatement()) {
+                statement.execute("SET application_name = 'pgmq-listener'");
                 for (String channel : signalsByChannel.keySet()) {
                     statement.execute("LISTEN " + quoteIdentifier(channel));
                 }
@@ -182,6 +202,7 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
 
         Connection connection = activeConnection.getAndSet(null);
         closeConnection(connection);
+        listenerStatus.connectionStopped();
         log.info("PGMQ LISTEN connection stopped.");
     }
 

@@ -12,7 +12,7 @@ This document outlines the system, software, and dependency requirements for usi
 
 ### Java Development Kit (JDK)
 - **Version:** Java 17 or higher. 
-- *Why?* The starter is built on top of Spring Boot 3.x, which mandates Java 17 as the baseline.
+- *Why?* The starter targets Spring Boot 4 while retaining Java 17 as its source baseline.
 
 ---
 
@@ -20,12 +20,13 @@ This document outlines the system, software, and dependency requirements for usi
 
 To use this starter in your application, your project must meet the following dependency baselines:
 
-- **Spring Boot:** `3.2.0` or higher.
+- **Spring Boot:** `4.0.0` or higher.
 - **Spring Data / JDBC:** The starter relies on `spring-boot-starter-jdbc` to interact with the database.
 - **Jackson:** Used for serializing and deserializing message payloads to and from JSONB.
 
 ### Optional Dependencies
-- **Micrometer (`micrometer-core`):** If present on the classpath, the starter will automatically register metrics for queue depth, processing latency, and throughput.
+- **Micrometer (`micrometer-core`):** If a `MeterRegistry` is present, the starter registers queue, processing, wake-up, reconnect, recovery, and empty-read metrics.
+- **Spring Boot health:** When present, contributes `pgmqListener` health details. The core runtime and status API do not require Actuator or Micrometer.
 - **Lombok:** If you are contributing to the starter's source code, Lombok is required to compile the project.
 
 ---
@@ -36,10 +37,16 @@ If you wish to contribute to the source code, you will need the following tools:
 
 - **Maven:** `3.8.x` or higher for building the project.
 - **Docker:** Required for running the integration test suite. 
-  - The project uses **Testcontainers** to spin up a real PostgreSQL database with the `pgmq` extension installed (`quay.io/tembo/pgmq-pg:latest`) during the `mvn test` phase.
+  - The project uses **Testcontainers** to spin up PostgreSQL with PGMQ from `ghcr.io/pgmq/pg18-pgmq:v1.10.0` during the `mvn test` phase.
+
+### LISTEN connection
+
+- Notification mode reserves one session-scoped PostgreSQL connection per application instance.
+- PgBouncer transaction pooling is not compatible with `LISTEN`; use a direct endpoint or session pooling.
+- A separate datasource can be supplied with `@PgmqNotificationDataSource` when the main datasource is transaction-pooled or tightly sized.
 
 ---
 
 ## 🚀 Deployment Requirements (Serverless / AOT)
 
-- **GraalVM (Optional):** If you intend to deploy your application as a Native Image (e.g., for AWS Lambda to reduce cold starts), you must use GraalVM 22.3+. The starter includes a `RuntimeHintsRegistrar` to ensure compatibility.
+- **GraalVM (Optional):** The starter contributes a `RuntimeHintsRegistrar` hook. Applications must still validate their listener methods and payload types with Spring's native test/build workflow.

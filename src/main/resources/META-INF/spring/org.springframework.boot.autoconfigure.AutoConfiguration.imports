@@ -1,1 +1,3 @@
 io.github.esgaltur.pgmq.config.PgmqAutoConfiguration
+io.github.esgaltur.pgmq.config.PgmqHealthAutoConfiguration
+io.github.esgaltur.pgmq.config.PgmqMetricsAutoConfiguration

@@ -7,21 +7,15 @@ import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
 
 /**
- * Provides Ahead-Of-Time (AOT) hints for GraalVM Native Image compilation.
- * This ensures that methods annotated with @PgmqListener are not stripped out 
- * by the native compiler and are accessible via Java Reflection at runtime.
+ * Registers the listener annotation as an AOT reflection hint and provides an
+ * extension point for future generated hints. Applications must still verify
+ * their listener methods and payload types with Spring's native-image tooling.
  */
 @NullMarked
 public class PgmqListenerRuntimeHints implements RuntimeHintsRegistrar {
 
     @Override
     public void registerHints(RuntimeHints hints, @Nullable ClassLoader classLoader) {
-        // We register a broad hint for the annotation itself
         hints.reflection().registerType(PgmqListener.class);
-        
-        // Note: In a true Spring AOT environment, BeanPostProcessors usually 
-        // register their own specific hints during the AOT phase. 
-        // For simplicity in this starter, this registrar acts as a hook point 
-        // to remind the AOT engine about the existence of the annotation.
     }
 }

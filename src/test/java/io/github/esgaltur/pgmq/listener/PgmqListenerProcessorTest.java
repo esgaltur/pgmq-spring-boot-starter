@@ -1,7 +1,7 @@
 package io.github.esgaltur.pgmq.listener;
 
-import io.micrometer.core.instrument.MeterRegistry;
 import io.github.esgaltur.pgmq.annotation.PgmqListener;
+import io.github.esgaltur.pgmq.annotation.PgmqListenerMode;
 import io.github.esgaltur.pgmq.config.PgmqProperties;
 import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
 import java.time.Duration;
+import org.springframework.transaction.support.TransactionOperations;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -19,9 +20,11 @@ class PgmqListenerProcessorTest {
     private PgmqTemplate pgmqTemplate;
     private PgmqIdempotencyRepository idempotencyRepository;
     private PgmqProperties pgmqProperties;
-    private MeterRegistry meterRegistry;
+    private PgmqListenerMetrics listenerMetrics;
     private PgmqListenerWakeupStrategy wakeupStrategy;
     private PgmqListenerRegistrar listenerRegistrar;
+    private PgmqListenerStatus listenerStatus;
+    private PgmqMessageHandler messageHandler;
     private PgmqListenerProcessor processor;
 
     @BeforeEach
@@ -33,13 +36,16 @@ class PgmqListenerProcessorTest {
         pgmqProperties.setListenerMode(PgmqProperties.ListenerMode.POLLING);
         pgmqProperties.setShutdownTimeout(Duration.ofSeconds(1));
         
-        meterRegistry = mock(MeterRegistry.class);
+        listenerMetrics = PgmqListenerMetrics.NO_OP;
         wakeupStrategy = new PgmqPollingListenerWakeupStrategy();
         listenerRegistrar = new PgmqListenerRegistrar();
+        listenerStatus = new PgmqListenerStatus();
+        messageHandler = new PgmqMessageHandler(
+                pgmqTemplate, idempotencyRepository, TransactionOperations.withoutTransaction());
         
         processor = new PgmqListenerProcessor(
-                listenerRegistrar, pgmqTemplate, idempotencyRepository,
-                pgmqProperties, wakeupStrategy, meterRegistry);
+                listenerRegistrar, pgmqTemplate, messageHandler,
+                pgmqProperties, wakeupStrategy, listenerStatus, listenerMetrics);
     }
 
     @Test
@@ -73,10 +79,13 @@ class PgmqListenerProcessorTest {
     void fallsBackToPollingWhenNotificationsCannotBeEnabled() {
         pgmqProperties.setListenerMode(PgmqProperties.ListenerMode.NOTIFY);
         DataSource dataSource = mock(DataSource.class);
-        wakeupStrategy = new PgmqNotifyListenerWakeupStrategy(pgmqTemplate, dataSource, pgmqProperties);
+        when(pgmqTemplate.getNotificationCapability()).thenReturn(
+                new PgmqTemplate.NotificationCapability(true, "1.10.0", "supported"));
+        wakeupStrategy = new PgmqNotifyListenerWakeupStrategy(
+                pgmqTemplate, dataSource, pgmqProperties, listenerStatus);
         processor = new PgmqListenerProcessor(
-                listenerRegistrar, pgmqTemplate, idempotencyRepository,
-                pgmqProperties, wakeupStrategy, meterRegistry);
+                listenerRegistrar, pgmqTemplate, messageHandler,
+                pgmqProperties, wakeupStrategy, listenerStatus, listenerMetrics);
         doThrow(new RuntimeException("enable_notify_insert is unavailable"))
                 .when(pgmqTemplate).enableInsertNotifications("test_q", 250);
 
@@ -85,8 +94,26 @@ class PgmqListenerProcessorTest {
         assertDoesNotThrow(() -> processor.start());
         assertTrue(processor.isRunning());
         verify(pgmqTemplate).enableInsertNotifications("test_q", 250);
+        assertEquals(PgmqListenerMode.POLLING,
+                listenerStatus.snapshot().queues().get("test_q").effectiveMode());
 
         processor.stop();
+    }
+
+    @Test
+    void rejectsConflictingModesForListenersSharingAQueue() {
+        listenerRegistrar.postProcessAfterInitialization(new PollingBean(), "pollingBean");
+        listenerRegistrar.postProcessAfterInitialization(new NotifyBean(), "notifyBean");
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, processor::start);
+
+        assertTrue(exception.getMessage().contains("same wake-up mode"));
+    }
+
+    @Test
+    void rejectsInvalidListenerIntervalsDuringRegistration() {
+        assertThrows(IllegalArgumentException.class,
+                () -> listenerRegistrar.postProcessAfterInitialization(new InvalidIntervalBean(), "invalid"));
     }
 
     static class TestBean {
@@ -97,5 +124,20 @@ class PgmqListenerProcessorTest {
     static class InvalidBean {
         @PgmqListener(queue = "test_q")
         public void handle(String payload, int extraParam) {}
+    }
+
+    static class PollingBean {
+        @PgmqListener(queue = "shared_q", mode = PgmqListenerMode.POLLING)
+        public void handle(String payload) {}
+    }
+
+    static class NotifyBean {
+        @PgmqListener(queue = "shared_q", mode = PgmqListenerMode.NOTIFY)
+        public void handle(String payload) {}
+    }
+
+    static class InvalidIntervalBean {
+        @PgmqListener(queue = "invalid_q", pollInterval = 0)
+        public void handle(String payload) {}
     }
 }

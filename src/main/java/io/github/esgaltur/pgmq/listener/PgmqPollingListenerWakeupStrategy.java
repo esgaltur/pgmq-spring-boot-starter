@@ -1,9 +1,11 @@
 package io.github.esgaltur.pgmq.listener;
 
+import io.github.esgaltur.pgmq.annotation.PgmqListenerMode;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 /** Fixed-delay wake-up strategy retained for compatibility and comparison. */
 public final class PgmqPollingListenerWakeupStrategy implements PgmqListenerWakeupStrategy {
@@ -11,7 +13,7 @@ public final class PgmqPollingListenerWakeupStrategy implements PgmqListenerWake
     private final List<PgmqQueueSignal> workerSignals = new ArrayList<>();
 
     @Override
-    public void start(Set<String> queues) {
+    public void start(Map<String, PgmqListenerMode> queues) {
         // Polling needs no shared resource.
     }
 
@@ -19,7 +21,11 @@ public final class PgmqPollingListenerWakeupStrategy implements PgmqListenerWake
     public WaitHandle createWaitHandle(String queue, Duration pollingInterval) {
         PgmqQueueSignal signal = new PgmqQueueSignal();
         workerSignals.add(signal);
-        return signal.waitHandle(pollingInterval, Duration.ZERO);
+        return signal.waitHandle(
+                pollingInterval,
+                WakeupReason.POLLING,
+                Duration.ZERO,
+                Duration.ZERO);
     }
 
     @Override

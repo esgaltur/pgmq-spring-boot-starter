@@ -6,12 +6,12 @@ This document outlines the planned features, enhancements, and milestones for th
 - ✅ `@PgmqListener` for declarative message consumption.
 - ✅ `PgmqTemplate` for message production and synchronous consumption.
 - ✅ Transactional Outbox built-in (Spring `@Transactional` integration).
-- ✅ Idempotency (Exactly-once delivery support).
+- ✅ Transactional processed-message deduplication.
 - ✅ High throughput batching.
 - ✅ Poison pill handling & Dead Letter Queues (DLQ).
 - ✅ Exponential backoff for retries.
 - ✅ Micrometer observability integration.
-- ✅ GraalVM Native Image (AOT) compatibility.
+- ✅ Spring AOT runtime-hint integration hook.
 
 ---
 
@@ -19,7 +19,9 @@ This document outlines the planned features, enhancements, and milestones for th
 
 ### Milestone 1: Stabilization & Observability (v0.1.0)
 *Focus: Improve visibility into queue health and make it easier to manage in production.*
-- [ ] **Spring Boot Actuator Endpoints:** Expose an endpoint (`/actuator/pgmq`) to view active queues, consumer lag, and metrics.
+- [x] **Spring Boot Health & Runtime Status:** Expose queue modes, LISTEN state,
+  fallback reasons, reconnects, recovery scans, and read counters through
+  `PgmqListenerStatus`, Actuator health, and Micrometer.
 - [ ] **Advanced DLQ Management:** Provide utilities via `PgmqTemplate` to inspect, replay, or clear messages from the Dead Letter Queue.
 - [ ] **Distributed Tracing:** Integrate with Micrometer Tracing (OpenTelemetry/Zipkin) to trace message flows across microservices.
 - [ ] **Dynamic Queue Management:** API methods to create and drop queues dynamically at runtime without restarting the application.

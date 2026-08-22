@@ -1,15 +1,16 @@
 package io.github.esgaltur.pgmq.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.core.JdbcPgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.listener.PgmqListenerProcessor;
 import io.github.esgaltur.pgmq.listener.PgmqListenerRegistrar;
+import io.github.esgaltur.pgmq.listener.PgmqListenerStatus;
+import io.github.esgaltur.pgmq.listener.PgmqListenerMetrics;
+import io.github.esgaltur.pgmq.listener.PgmqMessageHandler;
 import io.github.esgaltur.pgmq.listener.PgmqListenerWakeupStrategy;
 import io.github.esgaltur.pgmq.listener.PgmqNotifyListenerWakeupStrategy;
-import io.github.esgaltur.pgmq.listener.PgmqPollingListenerWakeupStrategy;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -21,6 +22,9 @@ import org.springframework.context.annotation.ImportRuntimeHints;
 import org.springframework.context.annotation.Role;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 
 @AutoConfiguration
@@ -56,13 +60,33 @@ public class PgmqAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public PgmqListenerStatus pgmqListenerStatus() {
+        return new PgmqListenerStatus();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PgmqMessageHandler pgmqMessageHandler(
+            PgmqTemplate pgmqTemplate,
+            PgmqIdempotencyRepository idempotencyRepository,
+            ObjectProvider<PlatformTransactionManager> transactionManagerProvider) {
+        PlatformTransactionManager transactionManager = transactionManagerProvider.getIfAvailable();
+        TransactionOperations transactions = transactionManager == null
+                ? TransactionOperations.withoutTransaction()
+                : new TransactionTemplate(transactionManager);
+        return new PgmqMessageHandler(pgmqTemplate, idempotencyRepository, transactions);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public PgmqListenerWakeupStrategy pgmqListenerWakeupStrategy(
             PgmqTemplate pgmqTemplate,
-            DataSource dataSource) {
-        if (pgmqProperties.getListenerMode() == PgmqProperties.ListenerMode.POLLING) {
-            return new PgmqPollingListenerWakeupStrategy();
-        }
-        return new PgmqNotifyListenerWakeupStrategy(pgmqTemplate, dataSource, pgmqProperties);
+            DataSource dataSource,
+            @PgmqNotificationDataSource ObjectProvider<DataSource> notificationDataSourceProvider,
+            PgmqListenerStatus listenerStatus) {
+        DataSource notificationDataSource = notificationDataSourceProvider.getIfAvailable(() -> dataSource);
+        return new PgmqNotifyListenerWakeupStrategy(
+                pgmqTemplate, notificationDataSource, pgmqProperties, listenerStatus);
     }
 
     @Bean
@@ -76,11 +100,13 @@ public class PgmqAutoConfiguration {
     public PgmqListenerProcessor pgmqListenerProcessor(
             PgmqListenerRegistrar listenerRegistrar,
             PgmqTemplate pgmqTemplate, 
-            PgmqIdempotencyRepository idempotencyRepository, 
+            PgmqMessageHandler messageHandler,
             PgmqListenerWakeupStrategy wakeupStrategy,
-            ObjectProvider<MeterRegistry> meterRegistryProvider) {
+            PgmqListenerStatus listenerStatus,
+            ObjectProvider<PgmqListenerMetrics> listenerMetricsProvider) {
         return new PgmqListenerProcessor(
-                listenerRegistrar, pgmqTemplate, idempotencyRepository, pgmqProperties,
-                wakeupStrategy, meterRegistryProvider.getIfAvailable());
+                listenerRegistrar, pgmqTemplate, messageHandler, pgmqProperties,
+                wakeupStrategy, listenerStatus,
+                listenerMetricsProvider.getIfAvailable(() -> PgmqListenerMetrics.NO_OP));
     }
 }

@@ -7,10 +7,14 @@ backends:
 ```yaml
 spring:
   pgmq:
-    listener-mode: notify # default
+    listener-mode: polling # safe default; use notify to opt in globally
     notification-recovery-interval: 30s
     notification-reconnect-interval: 1s
     notification-throttle-interval: 250ms
+    notification-wakeup-jitter: 25ms
+    coordinate-notification-wakeups: true
+    notification-wakeup-lease: 1s
+    schedule-delayed-messages: true
     auto-enable-notifications: true
 ```
 
@@ -65,12 +69,23 @@ disconnect is acceptable. It is not a safe replacement for durable background
 jobs, transactional outbox events, payments, or other work that must eventually
 be processed.
 
-Set `listener-mode: polling` to retain the previous fixed-delay behavior. In
+Set `listener-mode: notify` globally or select `mode = PgmqListenerMode.NOTIFY`
+on an individual `@PgmqListener`. In
 notification mode, each worker drains the queue until it is empty and then waits
 for PGMQ's `pgmq.q_<queue>.INSERT` notification. A timed recovery scan remains
 necessary for reconnect gaps, delayed messages, and visibility-timeout retries.
 After a notification, workers also perform one confirmation scan at the end of
 the throttle interval so inserts coalesced into the burst cannot be stranded.
+After an empty read, the listener also inspects the earliest future visibility
+timestamp and schedules a wake-up near that time. Delayed messages and retries
+therefore do not normally wait for the full recovery interval.
+
+Because PostgreSQL broadcasts a notification to every listening application
+instance, notification mode uses a short database lease per queue by default.
+Only the lease holder performs the immediate durable read; losing instances
+continue waiting and retain their recovery scans. This reduces empty-read
+amplification without turning the lease into message ownership: PGMQ's durable
+claim remains authoritative.
 
 ## Is it usable?
 
@@ -121,11 +136,13 @@ instance.
 - A queue is permanently busy. Workers already keep draining it, so
   notifications provide little latency benefit while retaining trigger cost.
 - Producer throughput is the main constraint. The reference benchmark below
-  measured an additional 93 ms for a 10,000-message batch with the notification
+  measured an additional 88 ms for a 10,000-message batch with the notification
   trigger enabled.
 - The deployment has many consumer replicas. PostgreSQL broadcasts each
   notification to every listening instance, which can create competing empty
-  reads after one instance has claimed the available messages.
+  reads after one instance has claimed the available messages. The wake-up
+  lease suppresses most duplicate immediate reads, but every instance still
+  receives the signal and very large fleets should be benchmarked.
 - Database connections are scarce. Notification mode reserves one additional
   session for each application instance.
 - Most work is delayed or consists of visibility-timeout retries. These events
@@ -148,7 +165,7 @@ instance.
 | Maximum batch-ingest throughput | `polling` | Avoids the insert-trigger overhead |
 | Very large consumer fleet | Benchmark both | Broadcast wake-ups may cause excess competing reads |
 | Strict database connection limit | `polling` | Does not reserve a dedicated LISTEN session |
-| Delay/retry-heavy workload | `polling`, or shorter recovery interval | Delayed visibility is found by timed reads |
+| Delay/retry-heavy workload | Benchmark both | Visibility-aware scheduling avoids the full recovery delay, but adds an inspection query after empty reads |
 
 ## Operational constraints
 
@@ -163,6 +180,15 @@ instance.
   idle periods. Lower values recover faster but perform more empty reads.
 - `notification-throttle-interval` trades producer overhead and signal volume
   for wake-up latency during bursts.
+- `notification-wakeup-jitter` spreads competing reads across replicas. Set it
+  to zero for minimum latency or raise it cautiously for large consumer fleets.
+- `coordinate-notification-wakeups` uses the
+  `pgmq_listener_wakeup_lease` support table to permit one immediate read per
+  queue across replicas. `notification-wakeup-lease` must remain shorter than
+  the recovery interval. Disable coordination only when each replica should
+  react independently or the support table cannot be installed.
+- `schedule-delayed-messages` queries the earliest future PGMQ visibility time
+  after an empty read and schedules a corresponding wake-up.
 - Notifications contain no application payload in this design. Consumers
   always load the authoritative message from PGMQ.
 
@@ -195,16 +221,16 @@ Measured on 2026-08-22 using PostgreSQL 18/PGMQ 1.10 in Docker Desktop:
 
 | Measurement | Polling/no trigger | LISTEN/NOTIFY trigger |
 |---|---:|---:|
-| Controlled sparse wake-up, median | 264 ms | 17 ms |
-| Controlled sparse wake-up, p95 | 274 ms | 18 ms |
-| `send_batch` of 10,000 messages, median of 5 warmed alternating runs | 54 ms | 147 ms |
+| Controlled sparse wake-up, median | 263 ms | 17 ms |
+| Controlled sparse wake-up, p95 | 265 ms | 18 ms |
+| `send_batch` of 10,000 messages, median of 5 warmed alternating runs | 56 ms | 144 ms |
 
 The latency comparison deliberately sends immediately after an empty polling
 read with a 250 ms polling interval, so it represents the controlled near-worst
 case rather than average uniformly distributed polling latency.
 
-The trigger added 93 ms to a 10,000-message batch in this environment, roughly
-9.3 microseconds per inserted message. This confirms PGMQ's guidance: use
+The trigger added 88 ms to a 10,000-message batch in this environment, roughly
+8.8 microseconds per inserted message. This confirms PGMQ's guidance: use
 notifications for sparse or latency-sensitive queues; pure polling can be the
 better choice for producers saturating a permanently busy queue. Consumption
 throughput after wake-up uses the same `pgmq.read` path in both modes.

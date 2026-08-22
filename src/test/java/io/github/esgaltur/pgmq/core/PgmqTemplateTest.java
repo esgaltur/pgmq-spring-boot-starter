@@ -42,7 +42,10 @@ class PgmqTemplateTest {
 
     @Test
     void testPopEmptyQueue() {
-        when(jdbcTemplate.query(any(String.class), any(RowMapper.class), eq("empty_q")))
+        when(jdbcTemplate.query(
+                any(String.class),
+                org.mockito.ArgumentMatchers.<RowMapper<PgmqMessage<String>>>any(),
+                eq("empty_q")))
                 .thenReturn(Collections.emptyList());
 
         Optional<PgmqMessage<String>> result = pgmqTemplate.pop("empty_q", String.class);
