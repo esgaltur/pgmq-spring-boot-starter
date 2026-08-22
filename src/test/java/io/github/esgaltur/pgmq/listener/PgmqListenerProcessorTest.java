@@ -8,6 +8,7 @@ import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
 import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -19,6 +20,8 @@ class PgmqListenerProcessorTest {
     private PgmqIdempotencyRepository idempotencyRepository;
     private PgmqProperties pgmqProperties;
     private MeterRegistry meterRegistry;
+    private PgmqListenerWakeupStrategy wakeupStrategy;
+    private PgmqListenerRegistrar listenerRegistrar;
     private PgmqListenerProcessor processor;
 
     @BeforeEach
@@ -27,18 +30,23 @@ class PgmqListenerProcessorTest {
         idempotencyRepository = mock(PgmqIdempotencyRepository.class);
         pgmqProperties = new PgmqProperties();
         pgmqProperties.setAutoCreateQueue(true);
+        pgmqProperties.setListenerMode(PgmqProperties.ListenerMode.POLLING);
         pgmqProperties.setShutdownTimeout(Duration.ofSeconds(1));
         
         meterRegistry = mock(MeterRegistry.class);
+        wakeupStrategy = new PgmqPollingListenerWakeupStrategy();
+        listenerRegistrar = new PgmqListenerRegistrar();
         
-        processor = new PgmqListenerProcessor(pgmqTemplate, idempotencyRepository, pgmqProperties, meterRegistry);
+        processor = new PgmqListenerProcessor(
+                listenerRegistrar, pgmqTemplate, idempotencyRepository,
+                pgmqProperties, wakeupStrategy, meterRegistry);
     }
 
     @Test
     void testAutoCreateQueueExceptionHandledGracefully() {
         // Setup a bean with the annotation
         TestBean bean = new TestBean();
-        processor.postProcessAfterInitialization(bean, "testBean");
+        listenerRegistrar.postProcessAfterInitialization(bean, "testBean");
 
         // Simulate DB error on queue creation
         doThrow(new RuntimeException("DB Connection failed")).when(pgmqTemplate).createQueue("test_q");
@@ -55,10 +63,30 @@ class PgmqListenerProcessorTest {
         InvalidBean invalidBean = new InvalidBean();
         
         IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> {
-            processor.postProcessAfterInitialization(invalidBean, "invalidBean");
+            listenerRegistrar.postProcessAfterInitialization(invalidBean, "invalidBean");
         });
         
         assertTrue(exception.getMessage().contains("exactly one parameter"));
+    }
+
+    @Test
+    void fallsBackToPollingWhenNotificationsCannotBeEnabled() {
+        pgmqProperties.setListenerMode(PgmqProperties.ListenerMode.NOTIFY);
+        DataSource dataSource = mock(DataSource.class);
+        wakeupStrategy = new PgmqNotifyListenerWakeupStrategy(pgmqTemplate, dataSource, pgmqProperties);
+        processor = new PgmqListenerProcessor(
+                listenerRegistrar, pgmqTemplate, idempotencyRepository,
+                pgmqProperties, wakeupStrategy, meterRegistry);
+        doThrow(new RuntimeException("enable_notify_insert is unavailable"))
+                .when(pgmqTemplate).enableInsertNotifications("test_q", 250);
+
+        listenerRegistrar.postProcessAfterInitialization(new TestBean(), "testBean");
+
+        assertDoesNotThrow(() -> processor.start());
+        assertTrue(processor.isRunning());
+        verify(pgmqTemplate).enableInsertNotifications("test_q", 250);
+
+        processor.stop();
     }
 
     static class TestBean {

@@ -30,7 +30,7 @@ public class PgmqSchemaInitializer implements InitializingBean {
             populator.execute(dataSource);
             log.info("PGMQ schema initialization complete.");
         } catch (Exception e) {
-            log.error("Failed to initialize PGMQ schema: {}", e.getMessage());
+            log.error("Failed to initialize PGMQ schema.", e);
         }
     }
 }

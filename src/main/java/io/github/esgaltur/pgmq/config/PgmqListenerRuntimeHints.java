@@ -1,6 +1,8 @@
 package io.github.esgaltur.pgmq.config;
 
 import io.github.esgaltur.pgmq.annotation.PgmqListener;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
 
@@ -9,10 +11,11 @@ import org.springframework.aot.hint.RuntimeHintsRegistrar;
  * This ensures that methods annotated with @PgmqListener are not stripped out 
  * by the native compiler and are accessible via Java Reflection at runtime.
  */
+@NullMarked
 public class PgmqListenerRuntimeHints implements RuntimeHintsRegistrar {
 
     @Override
-    public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
+    public void registerHints(RuntimeHints hints, @Nullable ClassLoader classLoader) {
         // We register a broad hint for the annotation itself
         hints.reflection().registerType(PgmqListener.class);
         

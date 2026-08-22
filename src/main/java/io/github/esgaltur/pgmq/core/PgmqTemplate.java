@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.NullMarked;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementCallback;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.sql.ResultSet;
@@ -27,7 +29,7 @@ public class PgmqTemplate {
      * @param queueName The name of the queue.
      */
     public void createQueue(String queueName) {
-        jdbcTemplate.execute("SELECT pgmq.create('" + queueName + "')");
+        executeQueueCommand("SELECT pgmq.create(?)", queueName);
     }
 
     /**
@@ -58,6 +60,52 @@ public class PgmqTemplate {
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to serialize payload", e);
         }
+    }
+
+    /**
+     * Enables PGMQ's throttled insert notifications for a queue. The function is
+     * idempotent and creates the PostgreSQL trigger used by LISTEN/NOTIFY consumers.
+     *
+     * @param queueName The queue whose inserts should emit notifications.
+     */
+    public void enableInsertNotifications(String queueName) {
+        enableInsertNotifications(queueName, 250);
+    }
+
+    /**
+     * Enables PGMQ insert notifications with an explicit throttle interval.
+     *
+     * @param queueName The queue whose inserts should emit notifications.
+     * @param throttleIntervalMillis Minimum milliseconds between notifications.
+     */
+    public void enableInsertNotifications(String queueName, int throttleIntervalMillis) {
+        jdbcTemplate.execute(
+            "SELECT pgmq.enable_notify_insert(?, ?)",
+            (PreparedStatementCallback<Void>) preparedStatement -> {
+                preparedStatement.setString(1, queueName);
+                preparedStatement.setInt(2, throttleIntervalMillis);
+                preparedStatement.execute();
+                return null;
+            }
+        );
+    }
+
+    /**
+     * Returns the documented PostgreSQL channel used by PGMQ insert notifications.
+     */
+    public String getInsertNotificationChannel(String queueName) {
+        return "pgmq.q_" + queueName + ".INSERT";
+    }
+
+    private void executeQueueCommand(String sql, String queueName) {
+        jdbcTemplate.execute(
+            sql,
+            (PreparedStatementCallback<Void>) preparedStatement -> {
+                preparedStatement.setString(1, queueName);
+                preparedStatement.execute();
+                return null;
+            }
+        );
     }
 
     /**
@@ -154,6 +202,7 @@ public class PgmqTemplate {
         }
     }
 
+    @NullMarked
     private record PgmqMessageRowMapper<T>(ObjectMapper objectMapper,
                                            Class<T> type) implements RowMapper<PgmqMessage<T>> {
             @Override

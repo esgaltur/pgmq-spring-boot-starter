@@ -64,7 +64,10 @@ spring:
     password: mypassword
 
   pgmq:
-    auto-create-queue: true    # Automatically issues CREATE EXTENSION and CREATE QUEUE on startup
+    auto-create-queue: true    # Automatically creates queues used by listeners
+    listener-mode: notify      # LISTEN/NOTIFY (default), or polling
+    notification-recovery-interval: 30s # Safety scan for missed/delayed messages
+    notification-throttle-interval: 250ms # Coalesce burst notifications
     default-vt: 30             # Default Visibility Timeout in seconds
     default-poll-interval: 500 # Default polling interval in milliseconds
     shutdown-timeout: 10s      # Grace period for in-flight messages during JVM shutdown
@@ -100,7 +103,24 @@ public class OrderService {
 
 ### Consuming Messages
 
-Annotate a Spring bean method with `@PgmqListener`. The library handles the background polling, JSON deserialization, and generic type resolution.
+Annotate a Spring bean method with `@PgmqListener`. The library handles notification-driven wake-up, recovery polling, JSON deserialization, and generic type resolution.
+
+Notification mode uses one dedicated JDBC connection per application instance and
+requires PGMQ's `enable_notify_insert` function. If notifications cannot be enabled,
+the affected queue automatically falls back to its configured `pollInterval`.
+For production, notification triggers can be managed in migrations by setting
+`auto-enable-notifications: false`. See the measured
+[polling versus LISTEN/NOTIFY comparison](docs/LISTEN_NOTIFY_COMPARISON.md).
+
+`LISTEN/NOTIFY` is only the wake-up mechanism. The PGMQ extension is still
+required and remains responsible for durable message storage and consumption.
+Notifications are transient hints; periodic recovery reads ensure a missed
+signal delays processing rather than losing a message.
+
+Removing PGMQ would require this starter to implement its own durable queue
+tables, transactional message claiming, retries, and visibility timeouts.
+`LISTEN/NOTIFY` alone is suitable only for best-effort broadcasts where losing
+an event while a consumer is disconnected is acceptable.
 
 ```mermaid
 sequenceDiagram
@@ -110,7 +130,7 @@ sequenceDiagram
     participant C as Consumer (@PgmqListener)
     
     P->>DB: pgmq.send('queue', payload)
-    loop Every 500ms
+    loop On NOTIFY or recovery scan
         C->>DB: pgmq.read('queue', vt=30s)
         alt Message Found
             DB-->>C: Returns Message (Invisible to others for 30s)
@@ -155,6 +175,24 @@ Why choose Postgres for messaging instead of Kafka, RabbitMQ, or AWS SQS?
 3. **The Microservices Diet:** Your architecture has become bloated with too many moving parts. Consolidating your message queue into your existing managed Postgres instance (like AWS RDS or Google Aurora) drastically reduces infrastructure costs and cognitive load.
 4. **Serverless / Edge Deployments:** Because this library is fully GraalVM Native Image compatible, you can deploy Spring Boot lambdas that connect to your database and process queues instantly without JVM warmup times.
 
+### Choosing notification or polling mode
+
+Use the default `notify` mode for transactional outbox events, email and webhook
+jobs, workflow steps, and other sparse or bursty queues where low idle-to-active
+latency matters. It is best suited to continuously running applications with a
+small or moderate number of replicas and room for one dedicated PostgreSQL
+connection per instance.
+
+Use `polling` for permanently busy queues, maximum-rate telemetry or bulk
+ingestion, very large consumer fleets, strict connection budgets, or workloads
+dominated by delayed messages and visibility-timeout retries. Polling is also
+the compatible option when PGMQ notification functions or trigger-management
+permissions are unavailable.
+
+For PgBouncer, the LISTEN connection requires session affinity: use a direct
+PostgreSQL connection or session pooling, not transaction pooling. See the full
+[use-case and mode-selection guide](docs/LISTEN_NOTIFY_COMPARISON.md#recommended-use-cases).
+
 ---
 
 ## ☁️ Serverless Usage (AWS Lambda & Fargate)
@@ -162,7 +200,7 @@ Why choose Postgres for messaging instead of Kafka, RabbitMQ, or AWS SQS?
 How you consume messages in a Serverless environment depends entirely on your compute model.
 
 ### 1. Serverless Containers (AWS Fargate, Google Cloud Run)
-If you are deploying your Spring Boot app as a Docker container that runs continuously, simply use the `@PgmqListener` annotation exactly as documented. The background threads will poll the database seamlessly.
+If you are deploying your Spring Boot app as a Docker container that runs continuously, simply use the `@PgmqListener` annotation exactly as documented. The background threads will consume from the database while the container is active.
 
 ### 2. Serverless Functions (AWS Lambda)
 **Do not use `@PgmqListener` in AWS Lambda.** 
@@ -377,7 +415,7 @@ If `io.micrometer:micrometer-core` is on the classpath, the library automaticall
 
 We believe in testing against real infrastructure. This project uses **Testcontainers** to spin up a real PostgreSQL instance during the `mvn test` phase.
 
-The test suite validates complex asynchronous mechanics, race conditions, and transactional boundaries using the official `quay.io/tembo/pgmq-pg:latest` Docker image.
+The test suite validates complex asynchronous mechanics, race conditions, and transactional boundaries using the pinned `ghcr.io/pgmq/pg18-pgmq:v1.10.0` Docker image.
 
 To run the suite locally, ensure your Docker daemon is running and execute:
 ```bash

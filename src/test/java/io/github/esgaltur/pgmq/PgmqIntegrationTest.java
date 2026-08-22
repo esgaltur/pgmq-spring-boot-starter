@@ -38,7 +38,7 @@ public class PgmqIntegrationTest {
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-        DockerImageName.parse("quay.io/tembo/pgmq-pg:latest").asCompatibleSubstituteFor("postgres")
+        DockerImageName.parse("ghcr.io/pgmq/pg18-pgmq:v1.10.0").asCompatibleSubstituteFor("postgres")
     )
         .withDatabaseName("pgmq_testdb")
         .withUsername("postgres")
@@ -51,6 +51,8 @@ public class PgmqIntegrationTest {
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.datasource.driver-class-name", postgres::getDriverClassName);
         registry.add("spring.pgmq.auto-create-queue", () -> "true");
+        registry.add("spring.pgmq.listener-mode", () -> "notify");
+        registry.add("spring.pgmq.notification-recovery-interval", () -> "30s");
         
         // Define SpEL properties for testing
         registry.add("app.queues.dynamic", () -> "spel_queue");
@@ -96,6 +98,12 @@ public class PgmqIntegrationTest {
 
     @Autowired
     private SpelTestConsumer spelConsumer;
+
+    @Autowired
+    private NotifyLatencyTestConsumer notifyLatencyConsumer;
+
+    @Autowired
+    private ThrottledNotificationTestConsumer throttledNotificationConsumer;
 
     @Test
     void testManualProduceAndConsume() {
@@ -285,6 +293,31 @@ public class PgmqIntegrationTest {
     }
 
     @Test
+    void testNotificationWakesListenerBeforePollingInterval() throws InterruptedException {
+        long startedAt = System.nanoTime();
+        pgmqTemplate.send("notify_latency_queue", new TestPayload("notify_event", 1));
+
+        boolean processed = notifyLatencyConsumer.getLatch().await(3, TimeUnit.SECONDS);
+        long elapsedMillis = java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
+
+        assertTrue(processed, "LISTEN/NOTIFY did not wake the listener");
+        assertTrue(elapsedMillis < 3_000,
+                "Listener should wake well before its 10-second polling interval");
+    }
+
+    @Test
+    void testThrottledInsertIsFoundByConfirmationScan() throws InterruptedException {
+        pgmqTemplate.send("notify_throttle_queue", new TestPayload("first", 1));
+        assertTrue(throttledNotificationConsumer.getFirstMessage().await(2, TimeUnit.SECONDS));
+
+        // This insert normally falls inside PGMQ's 250 ms notification throttle window.
+        pgmqTemplate.send("notify_throttle_queue", new TestPayload("second", 2));
+
+        assertTrue(throttledNotificationConsumer.getAllMessages().await(2, TimeUnit.SECONDS),
+                "A throttled insert was not found by the post-notification confirmation scan");
+    }
+
+    @Test
     void testQueueDepth() {
         String queueName = "depth_queue";
         pgmqTemplate.createQueue(queueName);
@@ -422,6 +455,30 @@ public class PgmqIntegrationTest {
     
             public CountDownLatch getLatch() { return latch; }
             public TestPayload getReceivedPayload() { return receivedPayload; }
+        }
+
+        @Getter
+        @Component
+        public static class NotifyLatencyTestConsumer {
+            private final CountDownLatch latch = new CountDownLatch(1);
+
+            @PgmqListener(queue = "notify_latency_queue", pollInterval = 10_000)
+            public void handleMessage(TestPayload message) {
+                latch.countDown();
+            }
+        }
+
+        @Getter
+        @Component
+        public static class ThrottledNotificationTestConsumer {
+            private final CountDownLatch firstMessage = new CountDownLatch(1);
+            private final CountDownLatch allMessages = new CountDownLatch(2);
+
+            @PgmqListener(queue = "notify_throttle_queue", pollInterval = 10_000)
+            public void handleMessage(TestPayload message) {
+                firstMessage.countDown();
+                allMessages.countDown();
+            }
         }
     
         /**
