@@ -6,9 +6,10 @@ This document outlines the system, software, and dependency requirements for usi
 
 ### PostgreSQL
 - **Version:** PostgreSQL 14 or higher is recommended.
-- **Extension:** The [`pgmq`](https://github.com/tembo-io/pgmq) extension must be installed on your PostgreSQL server. 
+- **Extension:** The [`pgmq`](https://github.com/pgmq/pgmq) extension must be available on your PostgreSQL server. Without it the application stops at startup with an explanation (since 0.3.0), unless `spring.pgmq.initialize-schema=never`.
   - *Note:* If you are using a managed database provider (like AWS RDS, GCP Cloud SQL, or Azure), ensure they support installing custom extensions or provide `pgmq` natively (e.g., Tembo Cloud).
   - PGMQ 1.10 or newer is required for the complementary throttled `LISTEN/NOTIFY` wake-up mode. PGMQ remains the durable queue in this mode; older versions automatically fall back to polling.
+  - *Self-managed servers:* PGMQ 1.10 is plain SQL. Copy `pgmq.control` and `pgmq--1.10.0.sql` into `$(pg_config --sharedir)/extension`; no package or compiled module is needed, and the database owner can create the extension without superuser rights (`superuser = false` in the control file).
 
 ### Java Development Kit (JDK)
 - **Version:** Java 17 or higher. 
@@ -22,7 +23,7 @@ To use this starter in your application, your project must meet the following de
 
 - **Spring Boot:** `4.0.0` or higher.
 - **Spring Data / JDBC:** The starter relies on `spring-boot-starter-jdbc` to interact with the database.
-- **Jackson:** Used for serializing and deserializing message payloads to and from JSONB.
+- **Jackson:** Jackson 3 (Spring Boot 4's default) or Jackson 2 serializes payloads to and from JSONB, using the application's own mapper (`spring.pgmq.json`).
 
 ### Optional Dependencies
 - **Micrometer (`micrometer-core`):** If a `MeterRegistry` is present, the starter registers queue, processing, wake-up, reconnect, recovery, and empty-read metrics.
@@ -37,7 +38,7 @@ If you wish to contribute to the source code, you will need the following tools:
 
 - **Maven:** `3.8.x` or higher for building the project.
 - **Docker:** Required for running the integration test suite. 
-  - The project uses **Testcontainers** to spin up PostgreSQL with PGMQ from `ghcr.io/pgmq/pg18-pgmq:v1.10.0` during the `mvn test` phase.
+  - The project uses **Testcontainers** to spin up PostgreSQL with PGMQ from `ghcr.io/pgmq/pg18-pgmq:v1.10.0` during the `mvn test` phase, and a stock `postgres:16-alpine` to check the startup failure when the extension is missing.
 
 ### LISTEN connection
 

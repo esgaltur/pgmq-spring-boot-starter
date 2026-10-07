@@ -28,7 +28,7 @@
 > already in PostgreSQL, PGMQ can remove a separate broker from workloads that
 > do not require Kafka- or RabbitMQ-specific capabilities.
 
-This library acts as a native Spring Boot Auto-Configuration module bridging the gap between the [PGMQ](https://github.com/tembo-io/pgmq) extension and the Spring ecosystem. It provides an intuitive `@PgmqListener` annotation and a powerful `PgmqTemplate`, mirroring the developer experience of Spring Kafka or Spring AMQP, while unlocking the ACID guarantees of PostgreSQL.
+This library acts as a native Spring Boot Auto-Configuration module bridging the gap between the [PGMQ](https://github.com/pgmq/pgmq) extension and the Spring ecosystem. It provides an intuitive `@PgmqListener` annotation and a powerful `PgmqTemplate`, mirroring the developer experience of Spring Kafka or Spring AMQP, while unlocking the ACID guarantees of PostgreSQL.
 
 ---
 
@@ -58,7 +58,13 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 ### 1. Prerequisites
 - Java 17+
 - Spring Boot 4.0+
-- PostgreSQL database with the `pgmq` extension installed. *(See the [PGMQ documentation](https://github.com/tembo-io/pgmq) for installation instructions).*
+- PostgreSQL with the `pgmq` extension available. *(See the [PGMQ documentation](https://github.com/pgmq/pgmq) for installation.)*
+  PGMQ 1.10 is plain SQL: installing it means copying `pgmq.control` and `pgmq--<version>.sql` into
+  the server's extension folder (`$(pg_config --sharedir)/extension`). No compiled module or
+  server package is needed, and the control file sets `superuser = false`, so the database owner can
+  run `CREATE EXTENSION pgmq` without superuser rights. For containers, `ghcr.io/pgmq/pg16-pgmq` and
+  `ghcr.io/pgmq/pg18-pgmq` images are published. If the extension is missing, the application
+  stops at startup with an explanation (see [Database Schema Management](#database-schema-management-flyway--liquibase)).
 
 ### 2. Dependency
 Releases are published to **GitHub Packages**. Add the repository and the starter to your `pom.xml`:
@@ -127,6 +133,8 @@ spring:
     default-vt: 30             # Default Visibility Timeout in seconds
     default-poll-interval: 500 # Default polling interval in milliseconds
     shutdown-timeout: 10s      # Grace period for in-flight messages during JVM shutdown
+    initialize-schema: always  # Create the extension and support tables at startup; never = your migrations
+    json: auto                 # auto, jackson3 or jackson2 (see above)
 ```
 
 ---
@@ -138,7 +146,7 @@ spring:
 Inject `PgmqTemplate` into your services. The template automatically serializes your Java objects to JSONB using your application's `ObjectMapper`.
 
 ```java
-import io.github.pgmq.core.PgmqTemplate;
+import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -215,7 +223,7 @@ sequenceDiagram
 ```
 
 ```java
-import io.github.pgmq.annotation.PgmqListener;
+import io.github.esgaltur.pgmq.annotation.PgmqListener;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -245,7 +253,24 @@ Why choose Postgres for messaging instead of Kafka, RabbitMQ, or AWS SQS?
 1. **The Startup & MVP:** You are building a new project. You need background jobs (like sending welcome emails or processing images) but you don't want the DevOps overhead of maintaining a separate RabbitMQ cluster. 
 2. **The "Outbox" System:** Your primary data is in Postgres. You need to save a database record and emit an event atomically. Using PGMQ avoids the notorious "Dual Write" problem entirely without needing complex CDC tools like Debezium.
 3. **The Microservices Diet:** Your architecture has become bloated with too many moving parts. Consolidating your message queue into your existing managed Postgres instance (like AWS RDS or Google Aurora) drastically reduces infrastructure costs and cognitive load.
-4. **Serverless / Edge Deployments:** Because this library is fully GraalVM Native Image compatible, you can deploy Spring Boot lambdas that connect to your database and process queues instantly without JVM warmup times.
+4. **Serverless / Edge Deployments:** The starter contributes Spring AOT runtime hints, so Spring Boot native images can consume queues without JVM warm-up. Validate your own listener payloads with Spring's native build and tests.
+5. **Small servers:** a single VM with the application and PostgreSQL has no room for a broker. PGMQ adds queues without another process, and they are part of the database backups.
+
+### In production: MonoPath
+
+[MonoPath](https://monopath.app/), a logic-puzzle game, is the starter's first production user. It runs
+two Spring Boot instances and PostgreSQL 16 on one small VM, with PGMQ 1.10.0 installed by copying its
+two SQL files and created by Liquibase (`initialize-schema: never`).
+
+| Queue | Work | Starter features used |
+| --- | --- | --- |
+| `reminders` | Daily push reminders through Firebase Cloud Messaging | The dispatcher claims due reminders and enqueues them in **one transaction**; `maxRetries = 6`, `backoffMultiplier = 2.0`, `maxBackoff = 1800`, `deadLetterQueue = "reminders_dead"`; temporary FCM errors (429, 5xx) are retried, a removed device is not |
+| `board_generation` | Proving new puzzle boards to refill a pool of ready boards after a player takes one | `transactional = false`, because a proof takes seconds of CPU and must not hold a connection; both instances consume, so idle CPU does the work |
+
+Before the queues, a Firebase outage lost that day's reminders, and a restart lost board work in
+progress. Now both wait in the queue and are retried. Several releases came out of this use: Jackson 3
+payloads and `java.time` with Jackson 2 (0.1.0), `transactional = false` (0.2.0), and failing fast when
+the extension is missing (0.3.0).
 
 ### Choosing notification or polling mode
 
