@@ -12,17 +12,15 @@
     <img src="https://img.shields.io/badge/Spring_Boot-4.0-6DB33F?logo=springboot&amp;logoColor=white" alt="Spring Boot 4.0" />
     <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&amp;logoColor=white" alt="PostgreSQL 14+" />
     <img src="https://img.shields.io/badge/license-MIT-13233A" alt="MIT License" />
-    <img src="https://img.shields.io/badge/status-early_beta-E5A50A" alt="Early beta" />
+    <img src="https://img.shields.io/badge/release-0.1.0-336791" alt="Release 0.1.0" />
   </p>
 </div>
 
 <br/>
 
-> ⚠️ **Project Status: Early Development (v0.0.1)**
-> 
-> This library implements advanced enterprise messaging patterns (Outbox, Idempotency, Exponential Backoff), but it is currently in its **early beta** phase. It has been heavily tested via automated integration suites, but **has not yet been battle-tested in high-scale production environments**. 
-> 
-> We encourage early adopters to test it, report bugs, and contribute. Please evaluate thoroughly before relying on it for mission-critical data.
+> **Release 0.1.0.** Covered by unit and integration tests against PostgreSQL with PGMQ. Its first
+> production use is [MonoPath](https://monopath.app/), a puzzle game, for reminder delivery and
+> background work. Reports and contributions are welcome.
 
 ---
 
@@ -61,15 +59,48 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 - PostgreSQL database with the `pgmq` extension installed. *(See the [PGMQ documentation](https://github.com/tembo-io/pgmq) for installation instructions).*
 
 ### 2. Dependency
-Add the starter to your `pom.xml`:
+Releases are published to **GitHub Packages**. Add the repository and the starter to your `pom.xml`:
 
 ```xml
+<repositories>
+    <repository>
+        <id>github</id>
+        <url>https://maven.pkg.github.com/esgaltur/pgmq-spring-boot-starter</url>
+    </repository>
+</repositories>
+
 <dependency>
     <groupId>io.github.esgaltur</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 ```
+
+Gradle (Kotlin DSL):
+
+```kotlin
+repositories {
+    maven("https://maven.pkg.github.com/esgaltur/pgmq-spring-boot-starter") {
+        credentials {
+            username = System.getenv("GITHUB_ACTOR")
+            password = System.getenv("GITHUB_TOKEN")
+        }
+        content { includeGroup("io.github.esgaltur") }
+    }
+}
+dependencies { implementation("io.github.esgaltur:pgmq-spring-boot-starter:0.1.0") }
+```
+
+GitHub Packages asks for a token even for public packages: in GitHub Actions the workflow's
+`GITHUB_TOKEN` works; elsewhere use a personal token with `read:packages`, or build the starter
+locally with `mvn install` and resolve it from the local Maven repository.
+
+### JSON: Jackson 3 and Jackson 2
+
+Payloads are serialized with the application's own Jackson mapper, so they follow its modules and
+settings. `spring.pgmq.json` chooses: `auto` (default) uses the application's Jackson 3 mapper (Spring
+Boot 4's default), else its Jackson 2 mapper, else a default Jackson 3 mapper; `jackson3` and
+`jackson2` force one. Provide your own `PgmqPayloadCodec` bean for anything else.
 
 ### 3. Configuration
 Configure your standard Spring Boot datasource and optional PGMQ properties in `application.yml`:

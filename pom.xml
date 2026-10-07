@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.github.esgaltur</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.1.0</version>
     <name>PGMQ Spring Boot Starter</name>
     <description>Spring-native durable messaging with PostgreSQL Message Queue</description>
 
@@ -30,6 +30,15 @@
         <developerConnection>scm:git:ssh://github.com:esgaltur/pgmq-spring-boot-starter.git</developerConnection>
         <url>https://github.com/esgaltur/pgmq-spring-boot-starter</url>
     </scm>
+
+    <!-- Releases are published to GitHub Packages by .github/workflows/publish.yml on a v* tag. -->
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/esgaltur/pgmq-spring-boot-starter</url>
+        </repository>
+    </distributionManagement>
 
     <properties>
         <java.version>17</java.version>
@@ -75,6 +84,12 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- java.time support for the Jackson 2 fallback mapper; Jackson 3 has it built in. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
         <dependency>

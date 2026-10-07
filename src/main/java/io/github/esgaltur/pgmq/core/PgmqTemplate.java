@@ -1,8 +1,5 @@
 package io.github.esgaltur.pgmq.core;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JavaType;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,7 +24,12 @@ public class PgmqTemplate {
     }
 
     private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper;
+    private final PgmqPayloadCodec payloadCodec;
+
+    /** Convenience for Jackson 2 users; auto-configuration passes a {@link PgmqPayloadCodec}. */
+    public PgmqTemplate(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
+        this(jdbcTemplate, new Jackson2PayloadCodec(objectMapper));
+    }
 
     /**
      * Creates a new queue.
@@ -55,16 +57,12 @@ public class PgmqTemplate {
      * @return The message ID.
      */
     public long sendWithDelay(String queueName, Object payload, int delaySeconds) {
-        try {
-            String jsonPayload = objectMapper.writeValueAsString(payload);
-            return jdbcTemplate.queryForObject(
-                "SELECT pgmq.send(?, ?::jsonb, ?)",
-                Long.class,
-                queueName, jsonPayload, delaySeconds
-            );
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize payload", e);
-        }
+        String jsonPayload = payloadCodec.write(payload);
+        return jdbcTemplate.queryForObject(
+            "SELECT pgmq.send(?, ?::jsonb, ?)",
+            Long.class,
+            queueName, jsonPayload, delaySeconds
+        );
     }
 
     /**
@@ -204,7 +202,7 @@ public class PgmqTemplate {
     public <T> List<PgmqMessage<T>> read(String queueName, int vt, int qty, Class<T> type) {
         return jdbcTemplate.query(
             "SELECT * FROM pgmq.read(?, ?, ?)",
-            new PgmqMessageRowMapper<>(objectMapper, type),
+            new PgmqMessageRowMapper<>(payloadCodec, type),
             queueName, vt, qty
         );
     }
@@ -219,7 +217,7 @@ public class PgmqTemplate {
     public <T> Optional<PgmqMessage<T>> pop(String queueName, Class<T> type) {
         List<PgmqMessage<T>> results = jdbcTemplate.query(
             "SELECT * FROM pgmq.pop(?)",
-            new PgmqMessageRowMapper<>(objectMapper, type),
+            new PgmqMessageRowMapper<>(payloadCodec, type),
             queueName
         );
         return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
@@ -287,13 +285,13 @@ public class PgmqTemplate {
     }
 
     @NullMarked
-    private record PgmqMessageRowMapper<T>(ObjectMapper objectMapper,
+    private record PgmqMessageRowMapper<T>(PgmqPayloadCodec payloadCodec,
                                            Class<T> type) implements RowMapper<PgmqMessage<T>> {
             @Override
             public PgmqMessage<T> mapRow(ResultSet rs, int rowNum) throws SQLException {
                 try {
                     String messageJson = rs.getString("message");
-                    T payload = objectMapper.readValue(messageJson, type);
+                    T payload = payloadCodec.read(messageJson, type);
 
                     return PgmqMessage.<T>builder()
                             .msgId(rs.getLong("msg_id"))
@@ -302,7 +300,7 @@ public class PgmqTemplate {
                             .vt(rs.getObject("vt", OffsetDateTime.class))
                             .payload(payload)
                             .build();
-                } catch (JsonProcessingException e) {
+                } catch (PgmqPayloadException e) {
                     throw new SQLException("Failed to deserialize PGMQ message payload", e);
                 }
             }

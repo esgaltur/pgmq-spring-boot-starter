@@ -1,5 +1,6 @@
 package io.github.esgaltur.pgmq.config;
 
+import io.github.esgaltur.pgmq.core.PgmqPayloadCodecs;
 import lombok.Data;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -25,6 +26,12 @@ public class PgmqProperties implements InitializingBean {
      * How listener workers wait for new messages.
      */
     private ListenerMode listenerMode = ListenerMode.POLLING;
+
+    /**
+     * Which Jackson serializes payloads. AUTO uses the application's Jackson 3 mapper, else its
+     * Jackson 2 mapper, else a default Jackson 3 mapper.
+     */
+    private PgmqPayloadCodecs.Json json = PgmqPayloadCodecs.Json.AUTO;
 
     /**
      * Maximum idle time between recovery scans in NOTIFY mode. Recovery scans

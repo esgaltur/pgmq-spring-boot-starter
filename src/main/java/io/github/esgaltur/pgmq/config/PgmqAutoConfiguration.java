@@ -1,6 +1,7 @@
 package io.github.esgaltur.pgmq.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.esgaltur.pgmq.core.PgmqPayloadCodec;
+import io.github.esgaltur.pgmq.core.PgmqPayloadCodecs;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.core.JdbcPgmqIdempotencyRepository;
@@ -44,12 +45,17 @@ public class PgmqAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public PgmqTemplate pgmqTemplate(JdbcTemplate jdbcTemplate, ObjectProvider<ObjectMapper> objectMapperProvider) {
-        // Spring Boot 4 auto-configures a Jackson 3 ObjectMapper, so a Jackson 2
-        // com.fasterxml.jackson.databind.ObjectMapper bean may be absent. Fall back to a
-        // bundled Jackson 2 instance so PGMQ works regardless of the app's Jackson version.
-        ObjectMapper objectMapper = objectMapperProvider.getIfAvailable(() -> new ObjectMapper().findAndRegisterModules());
-        return new PgmqTemplate(jdbcTemplate, objectMapper);
+    public PgmqPayloadCodec pgmqPayloadCodec(
+            ObjectProvider<tools.jackson.databind.ObjectMapper> jackson3,
+            ObjectProvider<com.fasterxml.jackson.databind.ObjectMapper> jackson2) {
+        // Adapt the application's own mapper, so payloads follow its modules and settings.
+        return PgmqPayloadCodecs.select(pgmqProperties.getJson(), jackson3.getIfAvailable(), jackson2.getIfAvailable());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PgmqTemplate pgmqTemplate(JdbcTemplate jdbcTemplate, PgmqPayloadCodec payloadCodec) {
+        return new PgmqTemplate(jdbcTemplate, payloadCodec);
     }
 
     @Bean
