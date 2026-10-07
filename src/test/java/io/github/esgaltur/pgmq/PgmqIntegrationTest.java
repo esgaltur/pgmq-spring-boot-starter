@@ -388,6 +388,11 @@ public class PgmqIntegrationTest {
                         == PgmqListenerStatus.ConnectionState.CONNECTED,
                 Duration.ofSeconds(3)));
         long reconnectsBefore = listenerStatus.snapshot().reconnects();
+        // Only the listening connection may carry the listener's name; pooled connections that once
+        // listened must not (they used to keep it, and this test then killed the wrong session).
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pgmq-listener'",
+                Integer.class));
 
         Boolean terminated = jdbcTemplate.queryForObject(
                 """
@@ -395,7 +400,6 @@ public class PgmqIntegrationTest {
                 FROM pg_stat_activity
                 WHERE application_name = 'pgmq-listener'
                   AND pid <> pg_backend_pid()
-                LIMIT 1
                 """,
                 Boolean.class);
         assertEquals(Boolean.TRUE, terminated);

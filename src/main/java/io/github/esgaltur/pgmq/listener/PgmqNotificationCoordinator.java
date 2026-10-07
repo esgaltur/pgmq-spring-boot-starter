@@ -166,8 +166,11 @@ final class PgmqNotificationCoordinator implements AutoCloseable {
         if (connection == null) {
             return;
         }
+        // The connection usually goes back to the application's pool: leave no listener state on it,
+        // or pooled connections keep reporting themselves as 'pgmq-listener' in pg_stat_activity.
         try (Statement statement = connection.createStatement()) {
             statement.execute("UNLISTEN *");
+            statement.execute("RESET application_name");
         } catch (SQLException e) {
             // The connection may already be broken. Closing it is still required.
             log.debug("Could not execute UNLISTEN while closing the PGMQ notification connection.", e);
