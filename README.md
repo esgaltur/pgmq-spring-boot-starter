@@ -12,13 +12,13 @@
     <img src="https://img.shields.io/badge/Spring_Boot-4.0-6DB33F?logo=springboot&amp;logoColor=white" alt="Spring Boot 4.0" />
     <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&amp;logoColor=white" alt="PostgreSQL 14+" />
     <img src="https://img.shields.io/badge/license-MIT-13233A" alt="MIT License" />
-    <img src="https://img.shields.io/badge/release-0.2.0-336791" alt="Release 0.2.0" />
+    <img src="https://img.shields.io/badge/release-0.3.0-336791" alt="Release 0.3.0" />
   </p>
 </div>
 
 <br/>
 
-> **Release 0.2.0.** Covered by unit and integration tests against PostgreSQL with PGMQ. Its first
+> **Release 0.3.0.** Covered by unit and integration tests against PostgreSQL with PGMQ. Its first
 > production use is [MonoPath](https://monopath.app/), a puzzle game, for reminder delivery and
 > background work. Reports and contributions are welcome.
 
@@ -74,7 +74,7 @@ Releases are published to **GitHub Packages**. Add the repository and the starte
 <dependency>
     <groupId>io.github.esgaltur</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
@@ -90,7 +90,7 @@ repositories {
         content { includeGroup("io.github.esgaltur") }
     }
 }
-dependencies { implementation("io.github.esgaltur:pgmq-spring-boot-starter:0.2.0") }
+dependencies { implementation("io.github.esgaltur:pgmq-spring-boot-starter:0.3.0") }
 ```
 
 GitHub Packages asks for a token even for public packages: in GitHub Actions the workflow's
@@ -477,6 +477,10 @@ public void handle(OrderEvent event) {
 By default, the starter creates the PGMQ extension and its small support tables
 for idempotency and cross-instance wake-up coordination using Spring's database
 initializer.
+
+If that fails, for example because the pgmq extension is not installed on the
+PostgreSQL server or the role may not create it, the application stops at startup
+with an explanation instead of starting without queues (since 0.3.0).
 
 **For Production Environments**, it is an industry standard to manage schemas explicitly via Flyway or Liquibase. You can disable the library's auto-DDL and run the SQL yourself:
 
