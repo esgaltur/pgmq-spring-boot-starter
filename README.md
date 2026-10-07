@@ -12,13 +12,13 @@
     <img src="https://img.shields.io/badge/Spring_Boot-4.0-6DB33F?logo=springboot&amp;logoColor=white" alt="Spring Boot 4.0" />
     <img src="https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&amp;logoColor=white" alt="PostgreSQL 14+" />
     <img src="https://img.shields.io/badge/license-MIT-13233A" alt="MIT License" />
-    <img src="https://img.shields.io/badge/release-0.1.0-336791" alt="Release 0.1.0" />
+    <img src="https://img.shields.io/badge/release-0.2.0-336791" alt="Release 0.2.0" />
   </p>
 </div>
 
 <br/>
 
-> **Release 0.1.0.** Covered by unit and integration tests against PostgreSQL with PGMQ. Its first
+> **Release 0.2.0.** Covered by unit and integration tests against PostgreSQL with PGMQ. Its first
 > production use is [MonoPath](https://monopath.app/), a puzzle game, for reminder delivery and
 > background work. Reports and contributions are welcome.
 
@@ -35,6 +35,8 @@ This library acts as a native Spring Boot Auto-Configuration module bridging the
 ## ✨ Features at a Glance
 
 - **Declarative Consumers:** Simply annotate methods with `@PgmqListener(queue = "my_queue")`.
+- **Long-running Handlers:** `@PgmqListener(transactional = false)` runs CPU-heavy work without holding a
+  connection or transaction; the message is finalized only after the method returns.
 - **Transactional Outbox Built-in:** Send messages safely within your standard `@Transactional` database methods.
 - **Poison Pill Handling:** Automatic routing to Dead Letter Queues (DLQ) after a configurable number of retries.
 - **Exponential Backoff:** Circuit-break failing external APIs by dynamically scaling visibility timeouts.
@@ -72,7 +74,7 @@ Releases are published to **GitHub Packages**. Add the repository and the starte
 <dependency>
     <groupId>io.github.esgaltur</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -88,7 +90,7 @@ repositories {
         content { includeGroup("io.github.esgaltur") }
     }
 }
-dependencies { implementation("io.github.esgaltur:pgmq-spring-boot-starter:0.1.0") }
+dependencies { implementation("io.github.esgaltur:pgmq-spring-boot-starter:0.2.0") }
 ```
 
 GitHub Packages asks for a token even for public packages: in GitHub Actions the workflow's

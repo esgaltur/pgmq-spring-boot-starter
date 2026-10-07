@@ -50,6 +50,16 @@ public @interface PgmqListener {
     boolean idempotent() default false;
 
     /**
+     * If true (default), the listener method, the idempotency record and finalizing the message run in
+     * one database transaction, so the listener's own database work commits only with the message.
+     * Set false for long-running handlers (for example CPU-bound work taking seconds): the method then
+     * runs without holding a connection or a transaction, manages its own short transactions, and the
+     * message is finalized only after the method returns normally. A failure still leaves the message
+     * in the queue for the usual retry, backoff and dead-letter handling.
+     */
+    boolean transactional() default true;
+
+    /**
      * Maximum number of times a message can be read before being considered a poison pill.
      * Set to 0 or negative to disable (default).
      */

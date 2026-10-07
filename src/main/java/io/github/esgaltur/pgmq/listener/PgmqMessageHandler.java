@@ -36,6 +36,16 @@ public final class PgmqMessageHandler {
     }
 
     Outcome processSingle(PgmqListenerMetadata metadata, PgmqMessage<?> message) {
+        if (!metadata.annotation().transactional()) {
+            if (isDuplicate(metadata, message)) {
+                archiveOrDelete(metadata.annotation(), metadata.queue(), message.getMsgId());
+                return Outcome.DUPLICATE;
+            }
+            // No transaction around the method: it may take long without holding a connection.
+            invoke(metadata, metadata.messageWrapped() ? message : message.getPayload());
+            transactions.executeWithoutResult(status -> markProcessedAndFinalize(metadata, message));
+            return Outcome.PROCESSED;
+        }
         Outcome outcome = transactions.execute(status -> {
             if (isDuplicate(metadata, message)) {
                 archiveOrDelete(metadata.annotation(), metadata.queue(), message.getMsgId());
@@ -54,6 +64,24 @@ public final class PgmqMessageHandler {
     }
 
     int processBatch(PgmqListenerMetadata metadata, List<PgmqMessage<?>> messages) {
+        if (!metadata.annotation().transactional()) {
+            List<PgmqMessage<?>> eligible = new ArrayList<>(messages.size());
+            for (PgmqMessage<?> message : messages) {
+                if (isDuplicate(metadata, message)) {
+                    archiveOrDelete(metadata.annotation(), metadata.queue(), message.getMsgId());
+                } else {
+                    eligible.add(message);
+                }
+            }
+            if (eligible.isEmpty()) {
+                return 0;
+            }
+            invoke(metadata, metadata.messageWrapped()
+                    ? eligible
+                    : eligible.stream().map(PgmqMessage::getPayload).toList());
+            transactions.executeWithoutResult(status -> eligible.forEach(message -> markProcessedAndFinalize(metadata, message)));
+            return eligible.size();
+        }
         Integer processed = transactions.execute(status -> {
             List<PgmqMessage<?>> eligible = new ArrayList<>(messages.size());
             for (PgmqMessage<?> message : messages) {

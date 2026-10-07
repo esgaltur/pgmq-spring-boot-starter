@@ -5,6 +5,9 @@ import io.github.esgaltur.pgmq.core.PgmqIdempotencyRepository;
 import io.github.esgaltur.pgmq.core.PgmqMessage;
 import io.github.esgaltur.pgmq.core.PgmqTemplate;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.lang.reflect.Method;
@@ -51,6 +54,60 @@ class PgmqMessageHandlerTest {
         verify(template, never()).delete("orders", 9L);
     }
 
+    /** Records whether code runs inside one of its transactions. */
+    static final class RecordingTransactions implements TransactionOperations {
+        boolean active;
+
+        @Override
+        public <T> T execute(TransactionCallback<T> action) {
+            active = true;
+            try {
+                TransactionStatus status = new SimpleTransactionStatus();
+                return action.doInTransaction(status);
+            } finally {
+                active = false;
+            }
+        }
+    }
+
+    @Test
+    void aTransactionalListenerRunsInsideTheTransaction() throws Exception {
+        RecordingTransactions transactions = new RecordingTransactions();
+        TestListener listener = new TestListener(transactions);
+        when(template.archive("orders", 21L)).thenReturn(true);
+
+        new PgmqMessageHandler(template, idempotencyRepository, transactions)
+                .processSingle(metadata(listener, "transactional"), message(21L, "work"));
+
+        assertEquals(Boolean.TRUE, listener.sawTransaction);
+        verify(template).archive("orders", 21L);
+    }
+
+    @Test
+    void aNonTransactionalListenerRunsWithoutATransactionAndIsFinalizedAfterwards() throws Exception {
+        RecordingTransactions transactions = new RecordingTransactions();
+        TestListener listener = new TestListener(transactions);
+        when(template.archive("orders", 23L)).thenReturn(true);
+
+        assertEquals(PgmqMessageHandler.Outcome.PROCESSED,
+                new PgmqMessageHandler(template, idempotencyRepository, transactions)
+                        .processSingle(metadata(listener, "longRunning"), message(23L, "work")));
+
+        assertEquals(Boolean.FALSE, listener.sawTransaction);
+        verify(template).archive("orders", 23L);
+    }
+
+    @Test
+    void aFailingNonTransactionalListenerLeavesTheMessageQueued() throws Exception {
+        TestListener listener = new TestListener();
+
+        assertThrows(PgmqMessageHandler.PgmqListenerInvocationException.class,
+                () -> handler.processSingle(metadata(listener, "longRunningFailing"), message(25L, "work")));
+
+        verify(template, never()).archive("orders", 25L);
+        verify(template, never()).delete("orders", 25L);
+    }
+
     @Test
     void deadLetterSendPrecedesSourceFinalization() throws Exception {
         TestListener listener = new TestListener();
@@ -79,6 +136,31 @@ class PgmqMessageHandlerTest {
 
     static class TestListener {
         int invocations;
+        Boolean sawTransaction;
+        private final RecordingTransactions transactions;
+
+        TestListener() {
+            this(null);
+        }
+
+        TestListener(RecordingTransactions transactions) {
+            this.transactions = transactions;
+        }
+
+        @PgmqListener(queue = "orders")
+        void transactional(String payload) {
+            sawTransaction = transactions.active;
+        }
+
+        @PgmqListener(queue = "orders", transactional = false)
+        void longRunning(String payload) {
+            sawTransaction = transactions.active;
+        }
+
+        @PgmqListener(queue = "orders", transactional = false)
+        void longRunningFailing(String payload) {
+            throw new IllegalStateException("failure");
+        }
 
         @PgmqListener(queue = "orders", idempotent = true)
         void idempotent(String payload) {
